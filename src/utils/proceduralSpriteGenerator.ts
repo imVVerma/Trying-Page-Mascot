@@ -4,19 +4,22 @@
  * and 3x3 head-direction / expression sprite sheets.
  */
 
+import { segmentAndExtractMascotBust } from './aiPortraitSegmenter';
+
 export interface GeneratedMascotSheets {
   directionsUrl: string;
   reactionsUrl: string;
 }
 
 /**
- * Creates a die-cut sticker bust from an image:
- * - Square crop centered on portrait
- * - Natural bust contour cutout (tapered shoulders)
- * - Cel-shade / comic tone enhancement
- * - Thick die-cut white outline with soft 3D ambient shadow
+ * Advanced Client-Side Smart Background Maskout & Die-Cut Vinyl Sticker Generator.
+ * 1. Square crops the portrait.
+ * 2. Samples background color and edge gradients from top and side borders.
+ * 3. Removes background pixels (flood-fill / color distance from boundary) while preserving portrait head & shoulders.
+ * 4. Adds a bold 14px die-cut vinyl sticker outline with soft 3D ambient drop-shadow.
+ * 5. Applies cel-shaded contrast and glossy sticker reflections.
  */
-function createDieCutStickerBust(imgElement: HTMLImageElement, size: number = 260): HTMLCanvasElement {
+export function createDieCutStickerBust(imgElement: HTMLImageElement, size: number = 330): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -27,55 +30,187 @@ function createDieCutStickerBust(imgElement: HTMLImageElement, size: number = 26
   const sh = imgElement.naturalHeight;
   const cropSize = Math.min(sw, sh);
   const sx = (sw - cropSize) / 2;
-  const sy = Math.max(0, (sh - cropSize) * 0.15); // portrait face bias
+  const sy = Math.max(0, (sh - cropSize) * 0.1); // portrait face bias
 
-  // Step 1: Draw offscreen bust silhouette path
-  const bustPath = new Path2D();
-  const cx = size / 2;
-  const cy = size * 0.46;
-  const headR = size * 0.36;
+  // Create an offscreen canvas for the cropped portrait
+  const procW = 280;
+  const procH = 280;
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = procW;
+  cropCanvas.height = procH;
+  const cCtx = cropCanvas.getContext('2d');
+  if (!cCtx) throw new Error('Could not get 2d context for cutout');
 
-  // Head circle + shoulder taper contour (smooth bust silhouette)
-  bustPath.arc(cx, cy, headR, Math.PI * 0.85, Math.PI * 0.15, false);
-  // Right shoulder curve
-  bustPath.bezierCurveTo(cx + headR + 10, size * 0.82, cx + headR + 24, size * 0.94, cx + headR + 18, size * 0.98);
-  // Bottom edge
-  bustPath.lineTo(cx - headR - 18, size * 0.98);
-  // Left shoulder curve
-  bustPath.bezierCurveTo(cx - headR - 24, size * 0.94, cx - headR - 10, size * 0.82, cx - headR, cy + headR * 0.7);
-  bustPath.closePath();
+  // Draw cropped photo
+  cCtx.drawImage(imgElement, sx, sy, cropSize, cropSize, 0, 0, procW, procH);
 
-  // Step 2: Draw drop shadow for 3D sticker effect
+  // Perform Smart Background Cutout / Maskout
+  const imgData = cCtx.getImageData(0, 0, procW, procH);
+  const data = imgData.data;
+
+  // Sample corner & top border pixels to determine the dominant background color
+  let bgR = 0, bgG = 0, bgB = 0, sampleCount = 0;
+  const samplePixel = (px: number, py: number) => {
+    const idx = (py * procW + px) * 4;
+    bgR += data[idx];
+    bgG += data[idx + 1];
+    bgB += data[idx + 2];
+    sampleCount++;
+  };
+
+  // Sample top edge and top corners
+  for (let x = 0; x < procW; x += 4) {
+    samplePixel(x, 0);
+    samplePixel(x, 1);
+    samplePixel(x, 2);
+  }
+  for (let y = 0; y < procH * 0.4; y += 4) {
+    samplePixel(0, y);
+    samplePixel(1, y);
+    samplePixel(procW - 1, y);
+    samplePixel(procW - 2, y);
+  }
+
+  bgR = Math.round(bgR / sampleCount);
+  bgG = Math.round(bgG / sampleCount);
+  bgB = Math.round(bgB / sampleCount);
+
+  // BFS Flood-fill from outer edges to mask out background
+  const visited = new Uint8Array(procW * procH);
+  const queue: number[] = [];
+
+  // Seed with perimeter pixels
+  for (let x = 0; x < procW; x++) {
+    queue.push(x, 0);
+    queue.push(x, procH - 1);
+    visited[x] = 1;
+    visited[(procH - 1) * procW + x] = 1;
+  }
+  for (let y = 1; y < procH - 1; y++) {
+    queue.push(0, y);
+    queue.push(procW - 1, y);
+    visited[y * procW] = 1;
+    visited[y * procW + (procW - 1)] = 1;
+  }
+
+  // Center protection zone (head region that must NEVER be erased)
+  const headCenterX = procW * 0.5;
+  const headCenterY = procH * 0.48;
+  const headRadiusX = procW * 0.32;
+  const headRadiusY = procH * 0.42;
+
+  let head = 0;
+  const colorTolerance = 46; // Euclidian distance tolerance
+
+  while (head < queue.length) {
+    const qx = queue[head++];
+    const qy = queue[head++];
+    const pIdx = (qy * procW + qx) * 4;
+
+    const r = data[pIdx];
+    const g = data[pIdx + 1];
+    const b = data[pIdx + 2];
+
+    const dist = Math.hypot(r - bgR, g - bgG, b - bgB);
+
+    // Check if pixel is background
+    const isHeadZone =
+      Math.pow((qx - headCenterX) / headRadiusX, 2) +
+        Math.pow((qy - headCenterY) / headRadiusY, 2) < 1.0;
+
+    if (dist <= colorTolerance && !isHeadZone) {
+      // Mark as transparent background
+      data[pIdx + 3] = 0;
+
+      // Expand to 4-way neighbors
+      const neighbors = [
+        [qx + 1, qy],
+        [qx - 1, qy],
+        [qx, qy + 1],
+        [qx, qy - 1],
+      ];
+
+      for (const [nx, ny] of neighbors) {
+        if (nx >= 0 && nx < procW && ny >= 0 && ny < procH) {
+          const nIdx = ny * procW + nx;
+          if (!visited[nIdx]) {
+            visited[nIdx] = 1;
+            queue.push(nx, ny);
+          }
+        }
+      }
+    }
+  }
+
+  cCtx.putImageData(imgData, 0, 0);
+
+  // Now create the final die-cut vinyl sticker badge
+  const pad = 10;
+  const badgeW = size - pad * 2;
+  const badgeH = size - pad * 2;
+  const radius = 56;
+
+  const stickerPath = new Path2D();
+  if (typeof (stickerPath as unknown as { roundRect?: Function }).roundRect === 'function') {
+    (stickerPath as unknown as { roundRect: Function }).roundRect(pad, pad, badgeW, badgeH, radius);
+  } else {
+    stickerPath.moveTo(pad + radius, pad);
+    stickerPath.lineTo(pad + badgeW - radius, pad);
+    stickerPath.quadraticCurveTo(pad + badgeW, pad, pad + badgeW, pad + radius);
+    stickerPath.lineTo(pad + badgeW, pad + badgeH - radius);
+    stickerPath.quadraticCurveTo(pad + badgeW, pad + badgeH, pad + badgeW - radius, pad + badgeH);
+    stickerPath.lineTo(pad + radius, pad + badgeH);
+    stickerPath.quadraticCurveTo(pad, pad + badgeH, pad, pad + badgeH - radius);
+    stickerPath.lineTo(pad, pad + radius);
+    stickerPath.quadraticCurveTo(pad, pad, pad + radius, pad);
+    stickerPath.closePath();
+  }
+
+  // Step 1: Draw drop shadow for 3D sticker effect
   ctx.save();
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-  ctx.shadowBlur = 12;
-  ctx.shadowOffsetY = 6;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 8;
   ctx.fillStyle = '#ffffff';
-  ctx.fill(bustPath);
+  ctx.fill(stickerPath);
   ctx.restore();
 
-  // Step 3: Draw thick white die-cut border
+  // Step 2: Draw thick white vinyl sticker outline
   ctx.save();
   ctx.lineWidth = 14;
   ctx.strokeStyle = '#ffffff';
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  ctx.stroke(bustPath);
+  ctx.stroke(stickerPath);
   ctx.restore();
 
-  // Step 4: Clip image to the bust path
+  // Step 3: Draw opaque white sticker backing
   ctx.save();
-  ctx.clip(bustPath);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill(stickerPath);
+  ctx.restore();
 
-  // Apply subtle cel-shade / vibrant cartoon filter to make it look like an illustration
-  ctx.filter = 'contrast(118%) saturate(125%) brightness(102%)';
-  ctx.drawImage(imgElement, sx, sy, cropSize, cropSize, cx - headR - 20, 0, (headR + 20) * 2, size);
+  // Step 4: Clip image to sticker badge and draw masked-out portrait
+  ctx.save();
+  ctx.clip(stickerPath);
+
+  // Cel-shade tone enhancement
+  ctx.filter = 'contrast(116%) saturate(120%) brightness(102%)';
+  ctx.drawImage(cropCanvas, pad, pad, badgeW, badgeH);
   ctx.filter = 'none';
 
-  // Inner subtle dark rim for clean definition
+  // Step 5: Glossy diagonal sticker glare reflection
+  const glossGrad = ctx.createLinearGradient(pad, pad, pad + badgeW * 0.8, pad + badgeH * 0.8);
+  glossGrad.addColorStop(0, 'rgba(255, 255, 255, 0.32)');
+  glossGrad.addColorStop(0.3, 'rgba(255, 255, 255, 0.10)');
+  glossGrad.addColorStop(0.65, 'transparent');
+  ctx.fillStyle = glossGrad;
+  ctx.fill(stickerPath);
+
+  // Step 6: Subtle inner rim
   ctx.lineWidth = 2.5;
-  ctx.strokeStyle = 'rgba(15, 23, 42, 0.4)';
-  ctx.stroke(bustPath);
+  ctx.strokeStyle = 'rgba(15, 23, 42, 0.2)';
+  ctx.stroke(stickerPath);
   ctx.restore();
 
   return canvas;
@@ -86,10 +221,27 @@ export async function generateSpriteSheetsFromPhoto(
 ): Promise<GeneratedMascotSheets> {
   const SHEET_SIZE = 1080;
   const CELL_SIZE = 360; // 3x3 grid
-  const BUST_SIZE = 250;
+  const BUST_SIZE = 330; // Fills 92% of 360px cell (Bold Fox scale)!
 
-  // Create the high-quality sticker bust
-  const stickerBust = createDieCutStickerBust(imgElement, BUST_SIZE);
+  const aiResult = await segmentAndExtractMascotBust(imgElement, BUST_SIZE);
+  const stickerBust = aiResult.bustCanvas;
+  const feat = aiResult.features;
+
+  const eyeLX = feat.eyeLeft.x - BUST_SIZE / 2;
+  const eyeLY = feat.eyeLeft.y - BUST_SIZE / 2;
+  const eyeRX = feat.eyeRight.x - BUST_SIZE / 2;
+  const eyeRY = feat.eyeRight.y - BUST_SIZE / 2;
+  const mouthX = feat.mouth.x - BUST_SIZE / 2;
+  const mouthY = feat.mouth.y - BUST_SIZE / 2;
+  const cheekLX = feat.cheekLeft.x - BUST_SIZE / 2;
+  const cheekLY = feat.cheekLeft.y - BUST_SIZE / 2;
+  const cheekRX = feat.cheekRight.x - BUST_SIZE / 2;
+  const cheekRY = feat.cheekRight.y - BUST_SIZE / 2;
+  const eyeDist = feat.eyeDistance;
+  const eyeTilt = feat.eyeTilt;
+  const fcX = feat.faceCenter.x - BUST_SIZE / 2;
+  const fcY = feat.faceCenter.y - BUST_SIZE / 2;
+  const hs = feat.headSize;
 
   // -------------------------------------------------------------
   // 1. Generate 3x3 DIRECTIONS Sheet (9 Head Angles)
@@ -102,15 +254,15 @@ export async function generateSpriteSheetsFromPhoto(
 
   // [dx, dy, rotateDeg, scaleX, scaleY]
   const DIRECTION_TRANSFORMS = [
-    [-18, -14, -5, 0.96, 1.02], // 0: Top-Left
-    [0, -18, 0, 0.95, 1.04],    // 1: Top
-    [18, -14, 5, 0.96, 1.02],   // 2: Top-Right
-    [-22, 0, -4, 0.93, 1.0],    // 3: Left
+    [-14, -10, -4, 0.97, 1.02], // 0: Top-Left
+    [0, -14, 0, 0.96, 1.03],    // 1: Top
+    [14, -10, 4, 0.97, 1.02],   // 2: Top-Right
+    [-16, 0, -3, 0.95, 1.0],    // 3: Left
     [0, 0, 0, 1.0, 1.0],        // 4: Center (Dead-zone)
-    [22, 0, 4, 0.93, 1.0],      // 5: Right
-    [-16, 15, -4, 1.03, 0.96],  // 6: Bottom-Left
-    [0, 20, 0, 1.04, 0.95],     // 7: Bottom
-    [16, 15, 4, 1.03, 0.96],    // 8: Bottom-Right
+    [16, 0, 3, 0.95, 1.0],      // 5: Right
+    [-12, 12, -3, 1.02, 0.97],  // 6: Bottom-Left
+    [0, 15, 0, 1.03, 0.96],     // 7: Bottom
+    [12, 12, 3, 1.02, 0.97],    // 8: Bottom-Right
   ];
 
   for (let r = 0; r < 3; r++) {
@@ -148,74 +300,74 @@ export async function generateSpriteSheetsFromPhoto(
       rCtx.save();
       rCtx.translate(cx, cy);
 
-      // Base Sticker Bust
+      // Base Character Bust (True borderless cutout)
       rCtx.drawImage(stickerBust, -BUST_SIZE / 2, -BUST_SIZE / 2);
 
-      // PRO STICKER VECTOR OVERLAYS (Full-Res Comic Elements)
+      // PRO STICKER VECTOR OVERLAYS (Accurately targeted to face landmarks)
       switch (idx) {
         case 0: // 0: Blink (Relaxed Closed Eyelids & Blush)
-          drawClosedEyelids(rCtx, -28, -12, 18);
-          drawClosedEyelids(rCtx, 28, -12, 18);
-          drawAnimeBlush(rCtx, -38, 16, 16);
-          drawAnimeBlush(rCtx, 38, 16, 16);
+          drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+          drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+          drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.35);
+          drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.35);
           break;
 
         case 1: // 1: Heart Eyes (Glossy 3D Hearts & Twin Floating Hearts)
-          drawGlossyHeart(rCtx, -28, -10, 26);
-          drawGlossyHeart(rCtx, 28, -10, 26);
-          drawFloatingHeart(rCtx, 56, -65, 22, '#f43f5e');
-          drawFloatingHeart(rCtx, -58, -50, 16, '#fb7185');
+          drawGlossyHeart(rCtx, eyeLX, eyeLY, eyeDist * 0.62, eyeTilt);
+          drawGlossyHeart(rCtx, eyeRX, eyeRY, eyeDist * 0.62, eyeTilt);
+          drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.48, hs * 0.2, '#f43f5e');
+          drawFloatingHeart(rCtx, fcX - hs * 0.52, fcY - hs * 0.38, hs * 0.16, '#fb7185');
           break;
 
         case 2: // 2: Sparkle (Golden 4-Point Anime Stars & Excited Eyes)
-          drawAnimeSparkleStar(rCtx, -60, -65, 26, '#f59e0b');
-          drawAnimeSparkleStar(rCtx, 65, -50, 22, '#fbbf24');
-          drawAnimeSparkleStar(rCtx, 52, 25, 16, '#38bdf8');
-          drawAnimeSparkleStar(rCtx, -50, 35, 14, '#fbbf24');
-          // Star gleam on eyes
-          drawEyeStarGleam(rCtx, -28, -12, 12);
-          drawEyeStarGleam(rCtx, 28, -12, 12);
+          drawAnimeSparkleStar(rCtx, fcX - hs * 0.56, fcY - hs * 0.46, hs * 0.24, '#f59e0b');
+          drawAnimeSparkleStar(rCtx, fcX + hs * 0.58, fcY - hs * 0.36, hs * 0.2, '#fbbf24');
+          drawAnimeSparkleStar(rCtx, fcX + hs * 0.46, fcY + hs * 0.28, hs * 0.16, '#38bdf8');
+          drawAnimeSparkleStar(rCtx, fcX - hs * 0.46, fcY + hs * 0.34, hs * 0.14, '#fbbf24');
+          drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
+          drawEyeStarGleam(rCtx, eyeRX, eyeRY, eyeDist * 0.24);
           break;
 
         case 3: // 3: Surprised (Gasping 'O' Mouth & Comic Sweat Drop)
-          drawComicSweatDrop(rCtx, 46, -45, 18);
-          drawGaspingMouth(rCtx, 0, 32, 15, 22);
+          drawComicSweatDrop(rCtx, fcX + hs * 0.44, fcY - hs * 0.38, hs * 0.18);
+          drawGaspingMouth(rCtx, mouthX, mouthY, eyeDist * 0.24, eyeDist * 0.34);
           break;
 
         case 4: // 4: Wink (Playful Star Wink & Confident Smirk)
-          drawWinkingEye(rCtx, 28, -12, 22);
-          drawEyeStarGleam(rCtx, -28, -12, 12);
-          drawPlayfulSmirk(rCtx, 0, 26, 20);
-          drawFloatingHeart(rCtx, 58, -50, 15, '#ec4899');
+          drawWinkingEye(rCtx, eyeRX, eyeRY, eyeDist * 0.46, eyeTilt);
+          drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
+          drawPlayfulSmirk(rCtx, mouthX, mouthY, eyeDist * 0.42);
+          drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.38, hs * 0.15, '#ec4899');
           break;
 
         case 5: // 5: Bashful (Deep Rose Blush & Shy Sweet Glance)
-          drawDeepBlush(rCtx, -38, 12, 22);
-          drawDeepBlush(rCtx, 38, 12, 22);
-          drawCuteSmile(rCtx, 0, 26, 14);
+          drawDeepBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.4);
+          drawDeepBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.4);
+          drawCuteSmile(rCtx, mouthX, mouthY, eyeDist * 0.35);
           break;
 
         case 6: // 6: Sleepy (Cyan Sleep Bubble & Floating "Zzz")
-          drawSleepBubble(rCtx, 28, -18, 16);
-          drawSleepyZzz(rCtx, 50, -60);
-          drawClosedEyelids(rCtx, -28, -8, 18);
+          drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+          drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+          drawSleepBubble(rCtx, mouthX + eyeDist * 0.28, mouthY - eyeDist * 0.18, eyeDist * 0.38);
+          drawSleepyZzz(rCtx, fcX + hs * 0.5, fcY - hs * 0.46);
           break;
 
         case 7: // 7: Dizzy (Hypnosis Spiral Glasses, Orbiting Stars & Wavy Mouth)
-          drawHypnoSpiral(rCtx, -28, -10, 20);
-          drawHypnoSpiral(rCtx, 28, -10, 20);
-          drawAnimeSparkleStar(rCtx, -44, -75, 16, '#eab308');
-          drawAnimeSparkleStar(rCtx, 0, -85, 20, '#facc15');
-          drawAnimeSparkleStar(rCtx, 44, -75, 16, '#eab308');
-          drawWavyDazedMouth(rCtx, 0, 32, 28);
+          drawHypnoSpiral(rCtx, eyeLX, eyeLY, eyeDist * 0.48);
+          drawHypnoSpiral(rCtx, eyeRX, eyeRY, eyeDist * 0.48);
+          drawAnimeSparkleStar(rCtx, fcX - hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
+          drawAnimeSparkleStar(rCtx, fcX, fcY - hs * 0.65, hs * 0.2, '#facc15');
+          drawAnimeSparkleStar(rCtx, fcX + hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
+          drawWavyDazedMouth(rCtx, mouthX, mouthY, eyeDist * 0.55);
           break;
 
         case 8: // 8: Delighted (Happy Arcs ^▽^ & Big Laughing Smile)
-          drawHappyEyeArc(rCtx, -28, -10, 18);
-          drawHappyEyeArc(rCtx, 28, -10, 18);
-          drawLaughingTeethMouth(rCtx, 0, 25, 26, 18);
-          drawAnimeBlush(rCtx, -40, 18, 14);
-          drawAnimeBlush(rCtx, 40, 18, 14);
+          drawHappyEyeArc(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+          drawHappyEyeArc(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+          drawLaughingTeethMouth(rCtx, mouthX, mouthY, eyeDist * 0.52, eyeDist * 0.36);
+          drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.32);
+          drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.32);
           break;
       }
 
@@ -233,9 +385,10 @@ export async function generateSpriteSheetsFromPhoto(
 // Pro Sticker Graphic Vector Renderers
 // -------------------------------------------------------------
 
-function drawGlossyHeart(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
+function drawGlossyHeart(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, tilt: number = 0) {
   ctx.save();
   ctx.translate(x, y);
+  if (tilt) ctx.rotate(tilt);
 
   // Outer bold border
   ctx.lineWidth = 5;
@@ -349,9 +502,10 @@ function drawEyeStarGleam(ctx: CanvasRenderingContext2D, x: number, y: number, r
   ctx.restore();
 }
 
-function drawClosedEyelids(ctx: CanvasRenderingContext2D, x: number, y: number, width: number) {
+function drawClosedEyelids(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, tilt: number = 0) {
   ctx.save();
   ctx.translate(x, y);
+  if (tilt) ctx.rotate(tilt);
   ctx.lineWidth = 5;
   ctx.strokeStyle = '#0f172a';
   ctx.lineCap = 'round';
@@ -364,9 +518,10 @@ function drawClosedEyelids(ctx: CanvasRenderingContext2D, x: number, y: number, 
   ctx.restore();
 }
 
-function drawWinkingEye(ctx: CanvasRenderingContext2D, x: number, y: number, width: number) {
+function drawWinkingEye(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, tilt: number = 0) {
   ctx.save();
   ctx.translate(x, y);
+  if (tilt) ctx.rotate(tilt);
   ctx.lineWidth = 5.5;
   ctx.strokeStyle = '#0f172a';
   ctx.lineCap = 'round';
@@ -384,9 +539,10 @@ function drawWinkingEye(ctx: CanvasRenderingContext2D, x: number, y: number, wid
   ctx.restore();
 }
 
-function drawHappyEyeArc(ctx: CanvasRenderingContext2D, x: number, y: number, width: number) {
+function drawHappyEyeArc(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, tilt: number = 0) {
   ctx.save();
   ctx.translate(x, y);
+  if (tilt) ctx.rotate(tilt);
   ctx.lineWidth = 6;
   ctx.strokeStyle = '#0f172a';
   ctx.lineCap = 'round';

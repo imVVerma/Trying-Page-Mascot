@@ -8,7 +8,6 @@ import {
   VolumeX,
   Eye,
   User,
-  Layers,
   Sliders,
   ExternalLink,
   Copy,
@@ -20,12 +19,16 @@ import {
   CheckCircle2,
   Package,
   FileCheck,
+  Wand2,
+  Key,
+  Cpu,
 } from 'lucide-react';
 import {
   EnhancedMascot,
-  type ArtStyle,
+  getStyleFilter,
   type Direction,
   type Reaction,
+  type ArtStyle,
 } from './components/EnhancedMascot';
 import { validateUserPhoto, type ValidationReport } from './utils/photoValidator';
 import {
@@ -35,11 +38,22 @@ import {
   type StickerItem,
 } from './utils/stickerSlicer';
 import { generateSpriteSheetsFromPhoto } from './utils/proceduralSpriteGenerator';
+import {
+  generateVectorMascotFromPhoto,
+  getHfToken,
+  saveHfToken,
+} from './services/vectorMascotService';
+import {
+  generateMascotFromAI,
+  getAiCreditsApiKey,
+  saveAiCreditsApiKey,
+} from './services/aiCreditsService';
 import './App.css';
 
 type CharacterId =
   | 'custom_uploaded'
   | 'fox'
+  | 'bear'
   | 'redpanda'
   | 'owl'
   | 'astronaut'
@@ -47,7 +61,7 @@ type CharacterId =
   | 'cat'
   | 'wizard';
 
-type ActiveTab = 'characters' | 'upload' | 'styles' | 'stickers' | 'props' | 'inspector';
+type ActiveTab = 'characters' | 'upload' | 'stickers' | 'props' | 'inspector';
 
 interface CharacterOption {
   id: CharacterId;
@@ -59,21 +73,13 @@ interface CharacterOption {
 
 const PRESET_CHARACTERS: CharacterOption[] = [
   { id: 'fox', name: 'Fox', role: 'Default Watcher' },
+  { id: 'bear', name: 'Bear', role: 'Forest Sleeper' },
   { id: 'redpanda', name: 'Red Panda', role: 'Bamboo Debugger' },
   { id: 'owl', name: 'Owl', role: 'Night Owl Reviewer' },
   { id: 'astronaut', name: 'Astronaut', role: 'Space Explorer' },
   { id: 'gearbot', name: 'Gearbot', role: 'CI/CD Automator' },
   { id: 'cat', name: 'Cat', role: 'Keyboard Stepper' },
   { id: 'wizard', name: 'Wizard', role: 'Regex Sorcerer' },
-];
-
-const STYLES: { id: ArtStyle; label: string; desc: string }[] = [
-  { id: 'colour', label: 'Colour', desc: 'Default vibrant full colour' },
-  { id: 'ink', label: 'Ink', desc: 'High-contrast graphic black line art' },
-  { id: 'sketch', label: 'Sketch', desc: 'Pencil shading & hatch texture' },
-  { id: 'riso', label: 'Riso', desc: 'Two-tone duotone print aesthetic' },
-  { id: 'paper', label: 'Paper', desc: 'Cut-paper craft layered depth' },
-  { id: 'pixel', label: 'Pixel', desc: '32px retro pixel sprite effect' },
 ];
 
 const DIRECTION_LABELS = [
@@ -100,11 +106,20 @@ const REACTION_METAS: { id: Reaction; label: string; emoji: string }[] = [
   { id: 'delighted', label: 'Delighted', emoji: '😁' },
 ];
 
+export const ART_STYLES: { id: ArtStyle; label: string; desc: string; icon: string }[] = [
+  { id: 'colour', label: 'Full Colour', desc: 'Default vibrant cel-shaded palette', icon: '🎨' },
+  { id: 'ink', label: 'Ink', desc: 'High-contrast graphic novel manga ink', icon: '✒️' },
+  { id: 'sketch', label: 'Sketch', desc: 'Textured graphite pencil sketch', icon: '✏️' },
+  { id: 'riso', label: 'Risograph', desc: 'Duotone magenta & electric purple', icon: '🖨️' },
+  { id: 'paper', label: 'Papercraft', desc: 'Cutout paper with shadow depth', icon: '📄' },
+  { id: 'pixel', label: 'Pixel Art', desc: 'Retro 8-bit crisp pixelated shader', icon: '👾' },
+];
+
 export default function App() {
   // Navigation & Core Selection
   const [activeTab, setActiveTab] = useState<ActiveTab>('characters');
   const [character, setCharacter] = useState<CharacterId>('fox');
-  const [style, setStyle] = useState<ArtStyle>('colour');
+  const [artStyle, setArtStyle] = useState<ArtStyle>('colour');
   const [size, setSize] = useState<number>(160);
   const [perchMode, setPerchMode] = useState<boolean>(false);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
@@ -134,6 +149,25 @@ export default function App() {
     previewUrl: string;
     name: string;
   } | null>(null);
+
+  // Generation Pipeline Mode & AI Services State
+  const [generationMode, setGenerationMode] = useState<'aicredits_flux' | 'flux_vector' | 'client_chibi'>('aicredits_flux');
+
+  // AICredits FLUX Schnell State
+  const [customAiCreditsKey, setCustomAiCreditsKey] = useState<string>(() => getAiCreditsApiKey());
+  const [savedAiCreditsKeyMsg, setSavedAiCreditsKeyMsg] = useState<boolean>(false);
+  const [aiCreditsPrompt, setAiCreditsPrompt] = useState<string>(
+    'Convert this portrait into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background.'
+  );
+
+  // Hugging Face FLUX.1-Kontext-dev & Vector Clipart Generation State
+  const [customHfToken, setCustomHfToken] = useState<string>(() => getHfToken());
+  const [savedTokenMsg, setSavedTokenMsg] = useState<boolean>(false);
+  const [hfPrompt, setHfPrompt] = useState<string>(
+    'Convert this person into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background, 3x3 grid style reference.'
+  );
+  const [generationStatusText, setGenerationStatusText] = useState<string>('');
+  const [generationError, setGenerationError] = useState<string | null>(null);
 
   // 18-Sticker Slicer State
   const [stickers, setStickers] = useState<StickerItem[]>([]);
@@ -198,33 +232,26 @@ export default function App() {
   );
 
   // Compute Active Mascot Sprite Sheet URLs
-  // BULLETPROOF ASSET RESOLUTION:
-  // For 'fox', load official artist-drawn style sheets locally from /mascots/fox-${style}-*.webp
-  // For custom uploads and Koboyo CDN characters, load base sheets + GPU shader filters
+  // All character sprite sheets are hosted locally in /mascots/ with 0 latency and 0 CORS issues!
   let directionsUrl = '';
   let reactionsUrl = '';
   let activeMascotName = 'Mascot';
-  let isFoxNativeStyle = false;
 
   if (character === 'custom_uploaded' && uploadedCustomSheets) {
     directionsUrl = uploadedCustomSheets.directionsUrl;
     reactionsUrl = uploadedCustomSheets.reactionsUrl;
     activeMascotName = uploadedCustomSheets.name || 'Custom Avatar';
-  } else if (character === 'fox') {
-    activeMascotName = 'Fox';
-    if (style === 'colour') {
-      directionsUrl = '/mascots/fox-directions.webp';
-      reactionsUrl = '/mascots/fox-reactions.webp';
-    } else {
-      directionsUrl = `/mascots/fox-${style}-directions.webp`;
-      reactionsUrl = `/mascots/fox-${style}-reactions.webp`;
-      isFoxNativeStyle = true;
-    }
   } else {
-    // Koboyo CDN characters: redpanda, owl, astronaut, gearbot, cat, wizard
-    const baseUrl = 'https://koboyo.com/page-mascot/mascots';
-    directionsUrl = `${baseUrl}/${character}-directions.webp`;
-    reactionsUrl = `${baseUrl}/${character}-reactions.webp`;
+    // Only 'fox' has native pre-rendered art style files on disk (e.g. /mascots/fox-ink-directions.webp)
+    if (character === 'fox' && artStyle !== 'colour') {
+      directionsUrl = `/mascots/fox-${artStyle}-directions.webp`;
+      reactionsUrl = `/mascots/fox-${artStyle}-reactions.webp`;
+    } else {
+      // All other characters (and custom avatar) load base colour sheets,
+      // and styles like 'ink', 'sketch', 'riso', 'paper', 'pixel' are rendered via CSS/canvas shaders!
+      directionsUrl = `/mascots/${character}-directions.webp`;
+      reactionsUrl = `/mascots/${character}-reactions.webp`;
+    }
     const found = PRESET_CHARACTERS.find((c) => c.id === character);
     activeMascotName = found ? found.name : character;
   }
@@ -246,29 +273,81 @@ export default function App() {
     }
   };
 
-  // Generate 3x3 Sprite Sheets from Validated Photo
+  // Generate 3x3 Sprite Sheets from Validated Photo (FLUX.1-Kontext-dev or Client-Side Chibi Rig)
   const handleGenerateMascotFromPhoto = async () => {
     if (!validationReport || !uploadedFile) return;
     setIsGeneratingMascot(true);
+    setGenerationError(null);
 
     try {
-      const img = new Image();
-      img.src = validationReport.previewUrl;
-      await new Promise((res) => {
-        img.onload = res;
-      });
+      let sourceImg: HTMLImageElement;
+      let mascotPreviewUrl = validationReport.previewUrl;
 
-      const sheets = await generateSpriteSheetsFromPhoto(img);
+      if (generationMode === 'aicredits_flux') {
+        setGenerationStatusText('Calling AICredits FLUX Schnell (api.aicredits.in)...');
+
+        // Call black-forest-labs/flux-1-schnell via AICredits OpenAI-compatible API
+        const hostedImageUrl = await generateMascotFromAI(aiCreditsPrompt, customAiCreditsKey);
+        mascotPreviewUrl = hostedImageUrl;
+
+        const img = new Image();
+        if (!hostedImageUrl.startsWith('data:')) {
+          img.crossOrigin = 'anonymous';
+        }
+        img.src = hostedImageUrl;
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = () => rej(new Error('Failed to load generated mascot image. Please check your network connection.'));
+        });
+        sourceImg = img;
+      } else if (generationMode === 'flux_vector') {
+        setGenerationStatusText('Calling Hugging Face FLUX.1-Kontext-dev (fal-ai provider)...');
+
+        // Call black-forest-labs/FLUX.1-Kontext-dev via fal-ai
+        const vectorBlob = await generateVectorMascotFromPhoto(uploadedFile, {
+          prompt: hfPrompt,
+          customToken: customHfToken,
+        });
+
+        mascotPreviewUrl = URL.createObjectURL(vectorBlob);
+        const img = new Image();
+        img.src = mascotPreviewUrl;
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = () => rej(new Error('Failed to load generated vector image'));
+        });
+        sourceImg = img;
+      } else {
+        setGenerationStatusText('Processing via client-side MediaPipe chibi rig...');
+        const img = new Image();
+        img.src = validationReport.previewUrl;
+        await new Promise((res) => {
+          img.onload = res;
+        });
+        sourceImg = img;
+      }
+
+      setGenerationStatusText('Generating 3×3 Direction & Reaction Sprite Sheets...');
+      const sheets = await generateSpriteSheetsFromPhoto(sourceImg);
       const name = uploadedFile.name.replace(/\.[^/.]+$/, '').slice(0, 15);
+
+      const prefix =
+        generationMode === 'aicredits_flux'
+          ? 'FLUX AI'
+          : generationMode === 'flux_vector'
+          ? 'Vector'
+          : 'Chibi';
 
       setUploadedCustomSheets({
         directionsUrl: sheets.directionsUrl,
         reactionsUrl: sheets.reactionsUrl,
-        previewUrl: validationReport.previewUrl,
-        name: `Custom (${name})`,
+        previewUrl: mascotPreviewUrl,
+        name: `${prefix} (${name})`,
       });
 
       setCharacter('custom_uploaded');
+      setSize(220); // Scale up custom mascot so it's bold, full-size and NOT a pinhole!
+      setActiveTab('stickers');
       playSound('success');
       confetti({
         particleCount: 60,
@@ -276,14 +355,16 @@ export default function App() {
         origin: { y: 0.6 },
         colors: ['#6366f1', '#06b6d4', '#ec4899', '#f59e0b'],
       });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Sprite generation failed:', err);
+      setGenerationError(err.message || 'Generation failed');
     } finally {
       setIsGeneratingMascot(false);
+      setGenerationStatusText('');
     }
   };
 
-  // Slice Current Sprite Sheets into 18 Stickers
+  // Slice Current Sprite Sheets into 18 Stickers with active art style
   const handleSliceStickers = useCallback(async () => {
     if (!directionsUrl || !reactionsUrl) return;
     setIsSlicingStickers(true);
@@ -292,7 +373,7 @@ export default function App() {
         directionsUrl,
         reactionsUrl,
         activeMascotName,
-        style
+        artStyle
       );
       setStickers(sliced);
     } catch (err) {
@@ -300,14 +381,14 @@ export default function App() {
     } finally {
       setIsSlicingStickers(false);
     }
-  }, [directionsUrl, reactionsUrl, activeMascotName, style]);
+  }, [directionsUrl, reactionsUrl, activeMascotName, artStyle]);
 
-  // Automatically refresh sticker pack when switching into stickers tab or changing character / style
+  // Automatically refresh sticker pack when switching into stickers tab, changing character, or changing art style
   useEffect(() => {
     if (activeTab === 'stickers') {
       handleSliceStickers();
     }
-  }, [activeTab, character, style, handleSliceStickers]);
+  }, [activeTab, character, artStyle, handleSliceStickers]);
 
   // Download All Stickers as .ZIP
   const handleDownloadAllZip = async () => {
@@ -323,13 +404,35 @@ export default function App() {
     }
   };
 
+  // Dedicated Dizzy Trigger: works 100% reliably
+  const triggerDizzy = () => {
+    setControlledReaction('dizzy');
+    setIsDizzy(true);
+    setCombo((c) => Math.max(c, 4));
+    setPokeCount((c) => c + 4);
+    playSound('dizzy');
+    confetti({
+      particleCount: 60,
+      spread: 70,
+      origin: { y: 0.65 },
+      colors: ['#ec4899', '#f59e0b', '#6366f1', '#06b6d4'],
+    });
+
+    window.clearTimeout((window as any).__dizzyTimer);
+    (window as any).__dizzyTimer = window.setTimeout(() => {
+      setControlledReaction(null);
+      setIsDizzy(false);
+      setCombo(0);
+    }, 4500);
+  };
+
   // Mascot Boop Callback
   const handleMascotBoop = (count: number, isDizzyState: boolean, activeReaction: Reaction | null) => {
     setPokeCount((c) => c + 1);
     setCombo(count);
-    setIsDizzy(isDizzyState);
 
     if (isDizzyState) {
+      setIsDizzy(true);
       playSound('dizzy');
       confetti({
         particleCount: 50,
@@ -337,10 +440,18 @@ export default function App() {
         origin: { y: 0.65 },
         colors: ['#ec4899', '#f59e0b', '#6366f1'],
       });
-    } else if (activeReaction === 'sparkle' || activeReaction === 'heart') {
-      playSound('sparkle');
+      window.clearTimeout((window as any).__dizzyTimer);
+      (window as any).__dizzyTimer = window.setTimeout(() => {
+        setIsDizzy(false);
+        setCombo(0);
+      }, 2200);
     } else {
-      playSound('poke');
+      setIsDizzy(false);
+      if (activeReaction === 'sparkle' || activeReaction === 'heart') {
+        playSound('sparkle');
+      } else {
+        playSound('poke');
+      }
     }
 
     // Clear any controlled reaction override so cycling is visible
@@ -365,8 +476,8 @@ export default function MyMascot() {
       <Mascot
         directions="${directionsUrl}"
         reactions="${reactionsUrl}"
-        size={${size}}
-        label="${activeMascotName} mascot in ${style} style"
+        size={${size}}${artStyle !== 'colour' ? `\n        artStyle="${artStyle}"` : ''}
+        label="${activeMascotName} mascot"
       />
     </div>
   );
@@ -394,7 +505,8 @@ export default function MyMascot() {
               directions={directionsUrl}
               reactions={reactionsUrl}
               size={48}
-              artStyle={style}
+              artStyle={artStyle}
+              className="header-mascot-btn"
               label="Mini perched avatar"
             />
           </div>
@@ -438,6 +550,11 @@ export default function MyMascot() {
                 <span className="char-badge-tag" style={{ marginLeft: '0.4rem' }}>
                   {activeMascotName}
                 </span>
+                {artStyle !== 'colour' && (
+                  <span className="char-badge-tag" style={{ marginLeft: '0.3rem', background: 'rgba(236,72,153,0.18)', borderColor: 'rgba(236,72,153,0.4)', color: '#f472b6' }}>
+                    {artStyle.toUpperCase()}
+                  </span>
+                )}
               </div>
               <div className="stage-status-pills">
                 <span className="status-pill">Angle: {pointerInfo.angle}°</span>
@@ -484,11 +601,12 @@ export default function MyMascot() {
                 }
               >
                 <EnhancedMascot
-                  key={`${directionsUrl}-${reactionsUrl}-${size}-${style}`}
+                  key={`${directionsUrl}-${reactionsUrl}-${size}-${artStyle}`}
                   directions={directionsUrl}
                   reactions={reactionsUrl}
                   size={size}
-                  artStyle={isFoxNativeStyle ? 'colour' : style}
+                  artStyle={artStyle}
+                  className="stage-mascot-btn"
                   label={activeMascotName}
                   controlledReaction={controlledReaction}
                   onBoop={handleMascotBoop}
@@ -508,12 +626,21 @@ export default function MyMascot() {
                     onClick={() => {
                       if (controlledReaction === r.id) {
                         setControlledReaction(null);
+                        setIsDizzy(false);
                       } else {
                         setControlledReaction(r.id);
                         if (r.id === 'dizzy') {
                           setIsDizzy(true);
+                          setCombo(4);
                           playSound('dizzy');
+                          confetti({
+                            particleCount: 50,
+                            spread: 65,
+                            origin: { y: 0.65 },
+                            colors: ['#ec4899', '#f59e0b', '#6366f1'],
+                          });
                         } else {
+                          setIsDizzy(false);
                           playSound('sparkle');
                         }
                       }
@@ -536,13 +663,34 @@ export default function MyMascot() {
               </div>
             </div>
 
+            {/* Quick Art Style Selector Bar */}
+            <div className="reaction-selector-row" style={{ marginTop: '0.45rem' }}>
+              <span className="reaction-row-label">Art Style:</span>
+              <div className="reaction-pills-scroll">
+                {ART_STYLES.map((style) => (
+                  <button
+                    key={style.id}
+                    className={`reaction-pill-btn ${artStyle === style.id ? 'active' : ''}`}
+                    onClick={() => {
+                      setArtStyle(style.id);
+                      playSound('sparkle');
+                    }}
+                    title={style.desc}
+                  >
+                    <span>{style.icon}</span>
+                    <span>{style.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Stage Action Toolbar */}
             <div className="stage-toolbar">
               <div className="action-btn-group">
                 <button
                   className="action-btn primary"
                   onClick={() => {
-                    const btn = document.querySelector('.enhanced-mascot-btn') as HTMLButtonElement;
+                    const btn = document.querySelector('.stage-mascot-btn') as HTMLButtonElement;
                     btn?.click();
                   }}
                 >
@@ -551,12 +699,8 @@ export default function MyMascot() {
                 </button>
                 <button
                   className="action-btn"
-                  onClick={() => {
-                    const btn = document.querySelector('.enhanced-mascot-btn') as HTMLButtonElement;
-                    for (let i = 0; i < 4; i++) {
-                      setTimeout(() => btn?.click(), i * 110);
-                    }
-                  }}
+                  onClick={triggerDizzy}
+                  title="Trigger rapid poke Dizzy reaction"
                 >
                   <Zap size={14} />
                   <span>Trigger 4x Dizzy</span>
@@ -622,13 +766,6 @@ export default function MyMascot() {
               <span>Photo Lab</span>
             </button>
             <button
-              className={`tab-btn ${activeTab === 'styles' ? 'active' : ''}`}
-              onClick={() => setActiveTab('styles')}
-            >
-              <Layers size={15} />
-              <span>Styles</span>
-            </button>
-            <button
               className={`tab-btn ${activeTab === 'stickers' ? 'active' : ''}`}
               onClick={() => setActiveTab('stickers')}
             >
@@ -691,10 +828,23 @@ export default function MyMascot() {
                   <button
                     key={char.id}
                     className={`char-card ${character === char.id ? 'active' : ''}`}
-                    onClick={() => setCharacter(char.id)}
+                    onClick={() => {
+                      setCharacter(char.id);
+                      playSound('poke');
+                    }}
                   >
-                    <span className="char-name">{char.name}</span>
-                    <span className="char-role">{char.role}</span>
+                    <div className="char-card-header">
+                      <div
+                        className="char-preview-thumb"
+                        style={{
+                          backgroundImage: `url(/mascots/${char.id}-directions.webp)`,
+                        }}
+                      />
+                      <div className="char-card-info">
+                        <span className="char-name">{char.name}</span>
+                        <span className="char-role">{char.role}</span>
+                      </div>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -757,6 +907,29 @@ export default function MyMascot() {
                 </div>
               </div>
 
+              {/* Quick Demo Sample Button */}
+              <div style={{ display: 'flex', justifyContent: 'center', marginTop: '-0.35rem' }}>
+                <button
+                  type="button"
+                  className="action-btn"
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      const res = await fetch('/test_sample.jpg');
+                      const blob = await res.blob();
+                      const file = new File([blob], 'sample_engineer.jpg', { type: 'image/jpeg' });
+                      handlePhotoSelect(file);
+                    } catch (err) {
+                      console.error('Failed to load demo portrait:', err);
+                    }
+                  }}
+                  style={{ fontSize: '0.78rem', padding: '0.35rem 0.8rem' }}
+                >
+                  <Sparkles size={13} color="#06b6d4" />
+                  <span>Try Demo Portrait (One-Click Test)</span>
+                </button>
+              </div>
+
               {/* Photo Lab Tips */}
               <div className="photo-tips-row">
                 <div className="photo-tip-badge">📸 Solo Portrait</div>
@@ -798,115 +971,338 @@ export default function MyMascot() {
                     ))}
                   </div>
 
+                  {/* Generation Mode Selector */}
+                  <div style={{ marginTop: '0.85rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#f1f5f9' }}>
+                        Generation Pipeline:
+                      </span>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        Select how your photo is converted
+                      </span>
+                    </div>
+
+                    <div className="generation-mode-row">
+                      <button
+                        type="button"
+                        className={`mode-select-btn ${generationMode === 'aicredits_flux' ? 'active' : ''}`}
+                        onClick={() => {
+                          setGenerationMode('aicredits_flux');
+                          setGenerationError(null);
+                        }}
+                      >
+                        <div className="mode-title">
+                          <Zap size={15} color="#eab308" />
+                          <span>AICredits FLUX Schnell</span>
+                        </div>
+                        <span className="mode-desc">
+                          black-forest-labs/flux-1-schnell via AICredits (~₹0.20/img). Ultra-fast high-res 2D mascot.
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`mode-select-btn ${generationMode === 'flux_vector' ? 'active' : ''}`}
+                        onClick={() => {
+                          setGenerationMode('flux_vector');
+                          setGenerationError(null);
+                        }}
+                      >
+                        <div className="mode-title">
+                          <Wand2 size={15} color="#ec4899" />
+                          <span>FLUX.1-Kontext-dev</span>
+                        </div>
+                        <span className="mode-desc">
+                          Hugging Face Inference (fal-ai). Image-guided style transformation.
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`mode-select-btn ${generationMode === 'client_chibi' ? 'active' : ''}`}
+                        onClick={() => {
+                          setGenerationMode('client_chibi');
+                          setGenerationError(null);
+                        }}
+                      >
+                        <div className="mode-title">
+                          <Cpu size={15} color="#06b6d4" />
+                          <span>Fast Client-Side Rig</span>
+                        </div>
+                        <span className="mode-desc">
+                          100% local MediaPipe WASM segmentation. Zero latency, no API key needed.
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* AICredits Configuration Box (When aicredits_flux mode selected) */}
+                  {generationMode === 'aicredits_flux' && (
+                    <div className="hf-config-card" style={{ borderColor: 'rgba(234, 179, 8, 0.35)' }}>
+                      <div className="hf-config-header">
+                        <div className="hf-config-title">
+                          <Key size={15} color="#eab308" />
+                          <span>AICredits API Integration (OpenAI Compatible)</span>
+                        </div>
+                        <span
+                          className={`hf-badge ${
+                            customAiCreditsKey.trim() ? 'connected' : 'needed'
+                          }`}
+                        >
+                          {customAiCreditsKey.trim() ? '✓ Key Connected' : '⚠ API Key Required'}
+                        </span>
+                      </div>
+
+                      <div className="hf-token-input-row">
+                        <input
+                          type="password"
+                          className="hf-token-input"
+                          placeholder="Paste your AICredits API Key (sk-...)"
+                          value={customAiCreditsKey}
+                          onChange={(e) => {
+                            setCustomAiCreditsKey(e.target.value);
+                            setSavedAiCreditsKeyMsg(false);
+                            setGenerationError(null);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="action-btn primary"
+                          style={{ fontSize: '0.75rem', padding: '0.45rem 0.85rem' }}
+                          onClick={() => {
+                            saveAiCreditsApiKey(customAiCreditsKey);
+                            setSavedAiCreditsKeyMsg(true);
+                            setTimeout(() => setSavedAiCreditsKeyMsg(false), 2500);
+                          }}
+                        >
+                          {savedAiCreditsKeyMsg ? 'Saved! ✓' : 'Save Key'}
+                        </button>
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        <span>
+                          Endpoint: <code>https://api.aicredits.in/v1</code> • Model: <code>black-forest-labs/flux-1-schnell</code>
+                        </span>
+                        <a
+                          href="https://aicredits.in"
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: '#38bdf8', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                        >
+                          <span>Get AICredits Key</span>
+                          <ExternalLink size={11} />
+                        </a>
+                      </div>
+
+                      {/* Prompt Customization */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                          <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Mascot Generation Prompt:</span>
+                          <button
+                            type="button"
+                            style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.7rem', cursor: 'pointer', padding: 0 }}
+                            onClick={() =>
+                              setAiCreditsPrompt(
+                                'Convert this portrait into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background.'
+                              )
+                            }
+                          >
+                            Reset Prompt
+                          </button>
+                        </div>
+                        <textarea
+                          className="hf-prompt-input"
+                          value={aiCreditsPrompt}
+                          onChange={(e) => setAiCreditsPrompt(e.target.value)}
+                          rows={2}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Hugging Face Configuration Box (Only when FLUX.1 mode selected) */}
+                  {generationMode === 'flux_vector' && (
+                    <div className="hf-config-card">
+                      <div className="hf-config-header">
+                        <div className="hf-config-title">
+                          <Key size={15} color="#f59e0b" />
+                          <span>Hugging Face Inference Providers Setup</span>
+                        </div>
+                        <span
+                          className={`hf-badge ${
+                            customHfToken.trim() ? 'connected' : 'needed'
+                          }`}
+                        >
+                          {customHfToken.trim() ? '✓ Token Connected' : '⚠ API Token Required'}
+                        </span>
+                      </div>
+
+                      <div className="hf-token-input-row">
+                        <input
+                          type="password"
+                          className="hf-token-input"
+                          placeholder="Paste your Hugging Face Access Token (hf_...)"
+                          value={customHfToken}
+                          onChange={(e) => {
+                            setCustomHfToken(e.target.value);
+                            setSavedTokenMsg(false);
+                            setGenerationError(null);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="action-btn primary"
+                          style={{ fontSize: '0.75rem', padding: '0.45rem 0.85rem' }}
+                          onClick={() => {
+                            saveHfToken(customHfToken);
+                            setSavedTokenMsg(true);
+                            setTimeout(() => setSavedTokenMsg(false), 2500);
+                          }}
+                        >
+                          {savedTokenMsg ? 'Saved! ✓' : 'Save Token'}
+                        </button>
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        <span>
+                          Model: <code>black-forest-labs/FLUX.1-Kontext-dev</code> via <code>fal-ai</code>
+                        </span>
+                        <a
+                          href="https://huggingface.co/settings/tokens"
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: '#38bdf8', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                        >
+                          <span>Get Free HF Token</span>
+                          <ExternalLink size={11} />
+                        </a>
+                      </div>
+
+                      {/* Prompt Customization */}
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                          <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Vector Style Prompt:</span>
+                          <button
+                            type="button"
+                            style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.7rem', cursor: 'pointer', padding: 0 }}
+                            onClick={() =>
+                              setHfPrompt(
+                                'Convert this person into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background, 3x3 grid style reference.'
+                              )
+                            }
+                          >
+                            Reset Prompt
+                          </button>
+                        </div>
+                        <textarea
+                          className="hf-prompt-input"
+                          value={hfPrompt}
+                          onChange={(e) => setHfPrompt(e.target.value)}
+                          rows={2}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active Generation Progress Status */}
+                  {isGeneratingMascot && generationStatusText && (
+                    <div className="generation-status-box">
+                      <Sparkles size={18} color="#ec4899" className="animate-spin" />
+                      <span>{generationStatusText}</span>
+                    </div>
+                  )}
+
+                  {/* Generation Error Banner with Fallback Option */}
+                  {generationError && (
+                    <div
+                      style={{
+                        marginTop: '0.75rem',
+                        padding: '0.75rem',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        border: '1px solid rgba(239, 68, 68, 0.35)',
+                        borderRadius: 'var(--radius-sm)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.5rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
+                        <AlertTriangle size={16} color="#f87171" style={{ flexShrink: 0, marginTop: '2px' }} />
+                        <span style={{ fontSize: '0.78rem', color: '#fca5a5' }}>
+                          {generationError}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          className="action-btn"
+                          style={{ fontSize: '0.74rem', padding: '0.35rem 0.75rem' }}
+                          onClick={() => {
+                            setGenerationMode('client_chibi');
+                            setGenerationError(null);
+                          }}
+                        >
+                          <Cpu size={13} color="#06b6d4" />
+                          <span>Switch to Fast Client-Side Rig (Zero Key Required)</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generate Button */}
-                  <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.75rem' }}>
+                  <div style={{ marginTop: '0.85rem', display: 'flex', gap: '0.75rem' }}>
                     <button
                       className="action-btn primary"
                       disabled={!validationReport.isValid || isGeneratingMascot}
                       onClick={handleGenerateMascotFromPhoto}
-                      style={{ flex: 1, justifyContent: 'center', padding: '0.65rem' }}
+                      style={{ flex: 1, justifyContent: 'center', padding: '0.75rem', fontSize: '0.85rem' }}
                     >
                       {isGeneratingMascot ? (
                         <>
                           <Sparkles size={16} className="animate-spin" />
-                          <span>Generating 3×3 Sprite Sheets...</span>
+                          <span>Generating Mascot &amp; 18 Stickers...</span>
+                        </>
+                      ) : generationMode === 'aicredits_flux' ? (
+                        <>
+                          <Zap size={16} color="#facc15" />
+                          <span>Generate with AICredits FLUX Schnell (~₹0.20)</span>
+                        </>
+                      ) : generationMode === 'flux_vector' ? (
+                        <>
+                          <Wand2 size={16} />
+                          <span>Generate 2D Vector Clipart (FLUX.1-Kontext-dev)</span>
                         </>
                       ) : (
                         <>
                           <Sparkles size={16} />
-                          <span>Generate My 3×3 Mascot (Client-Side)</span>
+                          <span>Generate My 3×3 Chibi Rig &amp; 18-Sticker Pack</span>
                         </>
                       )}
                     </button>
                   </div>
+
+                  {/* Generated Custom Mascot Ready Banner */}
+                  {uploadedCustomSheets && (
+                    <div style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(6, 182, 212, 0.12)', border: '1px solid rgba(6, 182, 212, 0.35)', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <img src={uploadedCustomSheets.previewUrl} alt="Preview" style={{ width: '42px', height: '42px', borderRadius: '50%', objectFit: 'cover', border: '2px solid #06b6d4' }} />
+                        <div>
+                          <strong style={{ fontSize: '0.88rem', color: '#67e8f9' }}>{uploadedCustomSheets.name} Ready!</strong>
+                          <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>Die-cut maskout &amp; 18 stickers are sliced and ready.</p>
+                        </div>
+                      </div>
+                      <button className="action-btn primary" onClick={() => setActiveTab('stickers')} style={{ fontSize: '0.78rem', padding: '0.4rem 0.8rem' }}>
+                        <Package size={14} />
+                        <span>Open 18 Stickers Pack ➔</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           )}
 
-          {/* TAB 3: ART STYLES */}
-          {activeTab === 'styles' && (
-            <div className="tab-content-card">
-              <div>
-                <h3 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-                  Visual Art Styles (6 Shaders)
-                </h3>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  Transform your active mascot ({activeMascotName}) into 6 distinctive art styles without missing assets or 404 errors.
-                </p>
-              </div>
-
-              <div className="style-grid">
-                {STYLES.map((s) => {
-                  const isHandDrawn = character === 'fox';
-                  const previewSrc = isHandDrawn
-                    ? `/mascots/fox-${s.id === 'colour' ? '' : `${s.id}-`}directions.webp`
-                    : directionsUrl;
-                  const previewFilter =
-                    !isHandDrawn && s.id !== 'colour'
-                      ? s.id === 'ink'
-                        ? 'grayscale(100%) contrast(280%) brightness(105%)'
-                        : s.id === 'sketch'
-                        ? 'grayscale(100%) contrast(150%) brightness(102%)'
-                        : s.id === 'riso'
-                        ? 'sepia(100%) hue-rotate(295deg) saturate(320%) contrast(135%)'
-                        : s.id === 'paper'
-                        ? 'contrast(125%) saturate(115%)'
-                        : s.id === 'pixel'
-                        ? 'contrast(140%) saturate(130%)'
-                        : 'none'
-                      : 'none';
-
-                  return (
-                    <div
-                      key={s.id}
-                      className={`style-card ${style === s.id ? 'active' : ''}`}
-                      onClick={() => {
-                        setStyle(s.id);
-                        playSound('poke');
-                      }}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <div className="style-card-header">
-                        <div className="style-preview-box">
-                          <div
-                            className="style-preview-sprite"
-                            style={{
-                              backgroundImage: `url(${previewSrc})`,
-                              filter: previewFilter,
-                              ...(s.id === 'pixel' ? { imageRendering: 'pixelated' } : {}),
-                            }}
-                          />
-                        </div>
-                        <div className="style-card-titles">
-                          <div className="style-label-row">
-                            <span className="style-label">{s.label}</span>
-                            <span className={`style-badge ${isHandDrawn ? 'hand-drawn' : 'gpu-shader'}`}>
-                              {isHandDrawn ? 'Hand-Drawn' : 'GPU Shader'}
-                            </span>
-                          </div>
-                          <p className="style-desc">{s.desc}</p>
-                          {style === s.id && (
-                            <span className="style-active-pill">
-                              <CheckCircle2 size={13} color="#818cf8" />
-                              Active Style
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="style-info-banner">
-                💡 <strong>Universal Art Architecture:</strong> Fox includes artist-drawn native sprite sheets for all 6 styles (ink, sketch, risograph, papercraft, and retro pixel). Custom user photos and other characters utilize GPU-accelerated CSS and SVG filter shaders to guarantee instant rendering with zero network lag or missing frames.
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: 18-STICKER SLICER & EXPORTER */}
+          {/* TAB 3: 18-STICKER SLICER & EXPORTER */}
           {activeTab === 'stickers' && (
             <div className="tab-content-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
@@ -1030,6 +1426,28 @@ export default function MyMascot() {
                 ))}
               </div>
 
+              {/* Art Style Selector */}
+              <div className="control-row">
+                <div className="control-label-row">
+                  <span>Art Style Shader</span>
+                  <span className="control-val">{artStyle.toUpperCase()}</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.4rem', marginTop: '0.3rem' }}>
+                  {ART_STYLES.map((s) => (
+                    <button
+                      key={s.id}
+                      className={`action-btn ${artStyle === s.id ? 'primary' : ''}`}
+                      onClick={() => setArtStyle(s.id)}
+                      style={{ fontSize: '0.75rem', padding: '0.4rem 0.5rem', justifyContent: 'center' }}
+                      title={s.desc}
+                    >
+                      <span>{s.icon}</span>
+                      <span>{s.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Perch Mode Toggle */}
               <div className="toggle-perch-box">
                 <div className="toggle-perch-info">
@@ -1062,8 +1480,8 @@ export default function MyMascot() {
   <Mascot
     directions="${directionsUrl}"
     reactions="${reactionsUrl}"
-    size={${size}}
-    label="${activeMascotName} mascot in ${style} style"
+    size={${size}}${artStyle !== 'colour' ? `\n    artStyle="${artStyle}"` : ''}
+    label="${activeMascotName} mascot"
   />
 </div>`}
                 </pre>
@@ -1097,6 +1515,7 @@ export default function MyMascot() {
                       src={directionsUrl}
                       alt="Directions sprite grid"
                       className="sheet-preview-img"
+                      style={getStyleFilter(artStyle, directionsUrl)}
                     />
                     <div className="grid-overlay-3x3">
                       {DIRECTION_LABELS.map((label, idx) => (
@@ -1125,6 +1544,7 @@ export default function MyMascot() {
                       src={reactionsUrl}
                       alt="Reactions sprite grid"
                       className="sheet-preview-img"
+                      style={getStyleFilter(artStyle, reactionsUrl)}
                     />
                     <div className="grid-overlay-3x3">
                       {REACTION_METAS.map((meta, idx) => (

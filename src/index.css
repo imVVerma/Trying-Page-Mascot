@@ -43,8 +43,9 @@ body {
   background-color: var(--bg-primary);
   color: var(--text-main);
   min-height: 100vh;
+  width: 100%;
   line-height: 1.5;
-  overflow-x: hidden;
+  overflow-x: auto;
   background-image: 
     radial-gradient(circle at 15% 10%, rgba(99, 102, 241, 0.15) 0%, transparent 40%),
     radial-gradient(circle at 85% 20%, rgba(6, 182, 212, 0.12) 0%, transparent 40%),
@@ -54,6 +55,7 @@ body {
 
 #root {
   min-height: 100vh;
+  width: 100%;
   display: flex;
   flex-direction: column;
 }

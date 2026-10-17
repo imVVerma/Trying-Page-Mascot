@@ -48,8 +48,8 @@ const BOOP_PAYOFF = 130;
 const BOOP_END = 620;
 const SQUASH_MS = 420;
 const DIZZY_AFTER = 4;
-const DIZZY_WINDOW = 1600;
-const DIZZY_END = 1200;
+const DIZZY_WINDOW = 2400; // was 1600; giving users 2.4s to click 4 times comfortably
+const DIZZY_END = 3200;    // was 1200; giving users 3.2s of dizzy expression
 
 const SQUASH_KEYFRAMES: Keyframe[] = [
   { transform: 'scale(1, 1)', easing: 'ease-in' },
@@ -69,7 +69,13 @@ function wrapAngle(angle: number) {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
 }
 
-export function getStyleFilter(style: ArtStyle): React.CSSProperties {
+export function getStyleFilter(style: ArtStyle, url?: string): React.CSSProperties {
+  // If the asset URL already contains `-${style}-` (e.g. fox-ink-directions.webp),
+  // the art style is natively baked into the image, so skip the CSS filter.
+  if (url && url.includes(`-${style}-`)) {
+    return { filter: 'none' };
+  }
+
   switch (style) {
     case 'ink':
       return {
@@ -133,8 +139,18 @@ export function EnhancedMascot({
   const [direction, setDirection] = useState<Direction>('center');
   const [internalReaction, setInternalReaction] = useState<Reaction | null>(null);
   const [imagesLoaded, setImagesLoaded] = useState(false);
+  const [activeDirections, setActiveDirections] = useState(directions);
+  const [activeReactions, setActiveReactions] = useState(reactions);
 
-  // Preload & decode images to completely prevent flicker
+  useEffect(() => {
+    setActiveDirections(directions);
+  }, [directions]);
+
+  useEffect(() => {
+    setActiveReactions(reactions);
+  }, [reactions]);
+
+  // Preload & decode images to completely prevent flicker, with robust fallback on 404
   useEffect(() => {
     let cancelled = false;
     const preload = async () => {
@@ -142,10 +158,26 @@ export function EnhancedMascot({
         const dImg = new Image();
         dImg.crossOrigin = 'anonymous';
         dImg.src = directions;
+        dImg.onerror = () => {
+          // If a styled variant fails to load (e.g., bear-ink-directions.webp),
+          // fallback to base colour sheet (e.g., bear-directions.webp)
+          const fallback = directions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
+          if (fallback !== directions && !cancelled) {
+            console.warn(`[EnhancedMascot] Falling back from ${directions} to ${fallback}`);
+            setActiveDirections(fallback);
+          }
+        };
 
         const rImg = new Image();
         rImg.crossOrigin = 'anonymous';
         rImg.src = reactions;
+        rImg.onerror = () => {
+          const fallback = reactions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
+          if (fallback !== reactions && !cancelled) {
+            console.warn(`[EnhancedMascot] Falling back from ${reactions} to ${fallback}`);
+            setActiveReactions(fallback);
+          }
+        };
 
         await Promise.allSettled([
           dImg.decode ? dImg.decode() : Promise.resolve(),
@@ -278,7 +310,7 @@ export function EnhancedMascot({
     }
   }, [onBoop]);
 
-  const styleFilter = getStyleFilter(artStyle);
+  const styleFilter = getStyleFilter(artStyle, activeDirections);
 
   const layerBase: React.CSSProperties = {
     position: 'absolute',
@@ -318,6 +350,7 @@ export function EnhancedMascot({
     >
       <span
         ref={squashRef}
+        className={activeReaction === 'dizzy' ? 'mascot-dizzy-wobble' : ''}
         style={{
           position: 'relative',
           display: 'block',
@@ -330,7 +363,7 @@ export function EnhancedMascot({
         <span
           style={{
             ...layerBase,
-            backgroundImage: `url("${directions}")`,
+            backgroundImage: `url("${activeDirections}")`,
             ...cellPosition(dirIndex >= 0 ? dirIndex : 4),
             opacity: activeReaction ? 0 : 1,
           }}
@@ -340,7 +373,7 @@ export function EnhancedMascot({
         <span
           style={{
             ...layerBase,
-            backgroundImage: `url("${reactions}")`,
+            backgroundImage: `url("${activeReactions}")`,
             ...cellPosition(reactIndex >= 0 ? reactIndex : 0),
             opacity: activeReaction ? 1 : 0,
           }}
