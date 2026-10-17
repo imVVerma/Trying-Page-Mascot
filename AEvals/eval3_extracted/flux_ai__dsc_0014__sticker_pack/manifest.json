@@ -1,0 +1,124 @@
+{
+  "title": "FLUX AI (DSC_0014) Page Mascot Sticker Pack",
+  "author": "Page Mascot Studio",
+  "version": "1.0.0",
+  "totalStickers": 18,
+  "format": "512x512 transparent WebP",
+  "compatibleWith": [
+    "WhatsApp",
+    "Telegram",
+    "Discord",
+    "Slack",
+    "iMessage"
+  ],
+  "stickers": [
+    {
+      "name": "Looking Up-Left",
+      "type": "direction",
+      "expressionOrAngle": "Top-Left",
+      "filename": "flux_ai__dsc_0014__01_up_left.webp"
+    },
+    {
+      "name": "Looking Up",
+      "type": "direction",
+      "expressionOrAngle": "Top",
+      "filename": "flux_ai__dsc_0014__02_up.webp"
+    },
+    {
+      "name": "Looking Up-Right",
+      "type": "direction",
+      "expressionOrAngle": "Top-Right",
+      "filename": "flux_ai__dsc_0014__03_up_right.webp"
+    },
+    {
+      "name": "Looking Left",
+      "type": "direction",
+      "expressionOrAngle": "Left",
+      "filename": "flux_ai__dsc_0014__04_left.webp"
+    },
+    {
+      "name": "Facing Center",
+      "type": "direction",
+      "expressionOrAngle": "Center",
+      "filename": "flux_ai__dsc_0014__05_center.webp"
+    },
+    {
+      "name": "Looking Right",
+      "type": "direction",
+      "expressionOrAngle": "Right",
+      "filename": "flux_ai__dsc_0014__06_right.webp"
+    },
+    {
+      "name": "Looking Down-Left",
+      "type": "direction",
+      "expressionOrAngle": "Down-Left",
+      "filename": "flux_ai__dsc_0014__07_down_left.webp"
+    },
+    {
+      "name": "Looking Down",
+      "type": "direction",
+      "expressionOrAngle": "Down",
+      "filename": "flux_ai__dsc_0014__08_down.webp"
+    },
+    {
+      "name": "Looking Down-Right",
+      "type": "direction",
+      "expressionOrAngle": "Down-Right",
+      "filename": "flux_ai__dsc_0014__09_down_right.webp"
+    },
+    {
+      "name": "Gentle Blink",
+      "type": "reaction",
+      "expressionOrAngle": "Blink",
+      "filename": "flux_ai__dsc_0014__10_blink.webp"
+    },
+    {
+      "name": "Heart Eyes / Love",
+      "type": "reaction",
+      "expressionOrAngle": "Heart",
+      "filename": "flux_ai__dsc_0014__11_heart_eyes.webp"
+    },
+    {
+      "name": "Sparkle Excitement",
+      "type": "reaction",
+      "expressionOrAngle": "Sparkle",
+      "filename": "flux_ai__dsc_0014__12_sparkle.webp"
+    },
+    {
+      "name": "Gasping Surprise",
+      "type": "reaction",
+      "expressionOrAngle": "Surprised",
+      "filename": "flux_ai__dsc_0014__13_surprised.webp"
+    },
+    {
+      "name": "Playful Wink",
+      "type": "reaction",
+      "expressionOrAngle": "Wink",
+      "filename": "flux_ai__dsc_0014__14_wink.webp"
+    },
+    {
+      "name": "Bashful Blush",
+      "type": "reaction",
+      "expressionOrAngle": "Bashful",
+      "filename": "flux_ai__dsc_0014__15_bashful.webp"
+    },
+    {
+      "name": "Sleepy / Zzz",
+      "type": "reaction",
+      "expressionOrAngle": "Sleepy",
+      "filename": "flux_ai__dsc_0014__16_sleepy.webp"
+    },
+    {
+      "name": "Dizzy Spirals (@_@)",
+      "type": "reaction",
+      "expressionOrAngle": "Dizzy",
+      "filename": "flux_ai__dsc_0014__17_dizzy.webp"
+    },
+    {
+      "name": "Delighted Joy",
+      "type": "reaction",
+      "expressionOrAngle": "Delighted",
+      "filename": "flux_ai__dsc_0014__18_delighted.webp"
+    }
+  ]
+}

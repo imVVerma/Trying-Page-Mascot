@@ -1,0 +1,124 @@
+{
+  "title": "Vaibhav Verma Page Mascot Sticker Pack",
+  "author": "Page Mascot Studio",
+  "version": "1.0.0",
+  "totalStickers": 18,
+  "format": "512x512 transparent WebP",
+  "compatibleWith": [
+    "WhatsApp",
+    "Telegram",
+    "Discord",
+    "Slack",
+    "iMessage"
+  ],
+  "stickers": [
+    {
+      "name": "Looking Up-Left",
+      "type": "direction",
+      "expressionOrAngle": "Top-Left",
+      "filename": "vaibhav_verma_01_up_left.webp"
+    },
+    {
+      "name": "Looking Up",
+      "type": "direction",
+      "expressionOrAngle": "Top",
+      "filename": "vaibhav_verma_02_up.webp"
+    },
+    {
+      "name": "Looking Up-Right",
+      "type": "direction",
+      "expressionOrAngle": "Top-Right",
+      "filename": "vaibhav_verma_03_up_right.webp"
+    },
+    {
+      "name": "Looking Left",
+      "type": "direction",
+      "expressionOrAngle": "Left",
+      "filename": "vaibhav_verma_04_left.webp"
+    },
+    {
+      "name": "Facing Center",
+      "type": "direction",
+      "expressionOrAngle": "Center",
+      "filename": "vaibhav_verma_05_center.webp"
+    },
+    {
+      "name": "Looking Right",
+      "type": "direction",
+      "expressionOrAngle": "Right",
+      "filename": "vaibhav_verma_06_right.webp"
+    },
+    {
+      "name": "Looking Down-Left",
+      "type": "direction",
+      "expressionOrAngle": "Down-Left",
+      "filename": "vaibhav_verma_07_down_left.webp"
+    },
+    {
+      "name": "Looking Down",
+      "type": "direction",
+      "expressionOrAngle": "Down",
+      "filename": "vaibhav_verma_08_down.webp"
+    },
+    {
+      "name": "Looking Down-Right",
+      "type": "direction",
+      "expressionOrAngle": "Down-Right",
+      "filename": "vaibhav_verma_09_down_right.webp"
+    },
+    {
+      "name": "Gentle Blink",
+      "type": "reaction",
+      "expressionOrAngle": "Blink",
+      "filename": "vaibhav_verma_10_blink.webp"
+    },
+    {
+      "name": "Heart Eyes / Love",
+      "type": "reaction",
+      "expressionOrAngle": "Heart",
+      "filename": "vaibhav_verma_11_heart_eyes.webp"
+    },
+    {
+      "name": "Sparkle Excitement",
+      "type": "reaction",
+      "expressionOrAngle": "Sparkle",
+      "filename": "vaibhav_verma_12_sparkle.webp"
+    },
+    {
+      "name": "Gasping Surprise",
+      "type": "reaction",
+      "expressionOrAngle": "Surprised",
+      "filename": "vaibhav_verma_13_surprised.webp"
+    },
+    {
+      "name": "Playful Wink",
+      "type": "reaction",
+      "expressionOrAngle": "Wink",
+      "filename": "vaibhav_verma_14_wink.webp"
+    },
+    {
+      "name": "Bashful Blush",
+      "type": "reaction",
+      "expressionOrAngle": "Bashful",
+      "filename": "vaibhav_verma_15_bashful.webp"
+    },
+    {
+      "name": "Sleepy / Zzz",
+      "type": "reaction",
+      "expressionOrAngle": "Sleepy",
+      "filename": "vaibhav_verma_16_sleepy.webp"
+    },
+    {
+      "name": "Dizzy Spirals (@_@)",
+      "type": "reaction",
+      "expressionOrAngle": "Dizzy",
+      "filename": "vaibhav_verma_17_dizzy.webp"
+    },
+    {
+      "name": "Delighted Joy",
+      "type": "reaction",
+      "expressionOrAngle": "Delighted",
+      "filename": "vaibhav_verma_18_delighted.webp"
+    }
+  ]
+}

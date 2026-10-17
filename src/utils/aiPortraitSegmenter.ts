@@ -430,9 +430,9 @@ export async function segmentAndExtractMascotBust(
   }
   bCtx.restore();
 
-  // Step C: Cel-shaded character bust on top (vibrant anime tone-map)
+  // Step C: Character bust on top with preserved 3D lighting & smooth shading
   bCtx.save();
-  bCtx.filter = 'contrast(114%) saturate(120%) brightness(102%)';
+  bCtx.filter = 'contrast(103%) saturate(106%)';
   bCtx.drawImage(cutoutCanvas, 0, 0);
   bCtx.filter = 'none';
   bCtx.restore();

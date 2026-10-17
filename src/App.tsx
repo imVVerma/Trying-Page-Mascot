@@ -47,6 +47,8 @@ import {
   generateMascotFromAI,
   getAiCreditsApiKey,
   saveAiCreditsApiKey,
+  DEFAULT_AICREDITS_PROMPT,
+  fileToBase64,
 } from './services/aiCreditsService';
 import './App.css';
 
@@ -156,9 +158,7 @@ export default function App() {
   // AICredits FLUX Schnell State
   const [customAiCreditsKey, setCustomAiCreditsKey] = useState<string>(() => getAiCreditsApiKey());
   const [savedAiCreditsKeyMsg, setSavedAiCreditsKeyMsg] = useState<boolean>(false);
-  const [aiCreditsPrompt, setAiCreditsPrompt] = useState<string>(
-    'Convert this portrait into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background.'
-  );
+  const [aiCreditsPrompt, setAiCreditsPrompt] = useState<string>(DEFAULT_AICREDITS_PROMPT);
 
   // Hugging Face FLUX.1-Kontext-dev & Vector Clipart Generation State
   const [customHfToken, setCustomHfToken] = useState<string>(() => getHfToken());
@@ -283,23 +283,51 @@ export default function App() {
       let sourceImg: HTMLImageElement;
       let mascotPreviewUrl = validationReport.previewUrl;
 
+      let isAiGenerated = false;
+
       if (generationMode === 'aicredits_flux') {
-        setGenerationStatusText('Calling AICredits FLUX Schnell (api.aicredits.in)...');
+        setGenerationStatusText('Analyzing photo likeness & generating 3×3 vector mascot sheet...');
 
-        // Call black-forest-labs/flux-1-schnell via AICredits OpenAI-compatible API
-        const hostedImageUrl = await generateMascotFromAI(aiCreditsPrompt, customAiCreditsKey);
-        mascotPreviewUrl = hostedImageUrl;
+        try {
+          // Convert user uploaded photo to base64 Data URI for image conditioning
+          const imageBase64 = await fileToBase64(uploadedFile);
 
-        const img = new Image();
-        if (!hostedImageUrl.startsWith('data:')) {
-          img.crossOrigin = 'anonymous';
+          // Call black-forest-labs/flux-1-redux-dev via local/Cloudflare backend proxy
+          const hostedImageUrl = await generateMascotFromAI(
+            aiCreditsPrompt,
+            imageBase64,
+            customAiCreditsKey,
+            45000
+          );
+          mascotPreviewUrl = hostedImageUrl;
+
+          const img = new Image();
+          if (!hostedImageUrl.startsWith('data:')) {
+            img.crossOrigin = 'anonymous';
+          }
+          img.src = hostedImageUrl;
+          await new Promise((res, rej) => {
+            img.onload = res;
+            img.onerror = () => rej(new Error('Failed to load generated mascot image.'));
+          });
+          sourceImg = img;
+          isAiGenerated = true;
+        } catch (aiErr: any) {
+          console.warn('AICredits generation failed or timed out. Falling back to client-side chibi rig:', aiErr);
+          setGenerationStatusText('AICredits unavailable. Gracefully falling back to instant client-side rig...');
+
+          // Clean graceful fallback to client-side MediaPipe chibi rig
+          const img = new Image();
+          img.src = validationReport.previewUrl;
+          await new Promise((res) => {
+            img.onload = res;
+          });
+          sourceImg = img;
+          mascotPreviewUrl = validationReport.previewUrl;
+
+          const reason = aiErr?.message || 'Connection timed out';
+          setGenerationError(`Notice: AICredits was unreachable (${reason}). Automatically switched to the Fast Client-Side Rig so your 18-pack stickers were created instantly!`);
         }
-        img.src = hostedImageUrl;
-        await new Promise((res, rej) => {
-          img.onload = res;
-          img.onerror = () => rej(new Error('Failed to load generated mascot image. Please check your network connection.'));
-        });
-        sourceImg = img;
       } else if (generationMode === 'flux_vector') {
         setGenerationStatusText('Calling Hugging Face FLUX.1-Kontext-dev (fal-ai provider)...');
 
@@ -333,7 +361,7 @@ export default function App() {
 
       const prefix =
         generationMode === 'aicredits_flux'
-          ? 'FLUX AI'
+          ? (isAiGenerated ? 'FLUX AI' : 'Chibi')
           : generationMode === 'flux_vector'
           ? 'Vector'
           : 'Chibi';
@@ -993,10 +1021,10 @@ export default function MyMascot() {
                       >
                         <div className="mode-title">
                           <Zap size={15} color="#eab308" />
-                          <span>AICredits FLUX Schnell</span>
+                          <span>AICredits FLUX AI</span>
                         </div>
                         <span className="mode-desc">
-                          black-forest-labs/flux-1-schnell via AICredits (~₹0.20/img). Ultra-fast high-res 2D mascot.
+                          Vision analysis + FLUX vector mascot avatar. Renders single clean portrait, then auto-rigs 3×3 gaze &amp; 9 expressions.
                         </span>
                       </button>
 
@@ -1081,7 +1109,7 @@ export default function MyMascot() {
 
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                         <span>
-                          Endpoint: <code>https://api.aicredits.in/v1</code> • Model: <code>black-forest-labs/flux-1-schnell</code>
+                          Endpoint: <code>https://api.aicredits.in/v1</code> • Engine: <code>Gemini 2.5 Vision + FLUX 3×3 Vector</code>
                         </span>
                         <a
                           href="https://aicredits.in"
@@ -1102,9 +1130,7 @@ export default function MyMascot() {
                             type="button"
                             style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.7rem', cursor: 'pointer', padding: 0 }}
                             onClick={() =>
-                              setAiCreditsPrompt(
-                                'Convert this portrait into a clean 2D chibi vector illustration style, bold black outlines, flat pastel coloring, minimalist anime eyes, isolated on a pure white background.'
-                              )
+                              setAiCreditsPrompt(DEFAULT_AICREDITS_PROMPT)
                             }
                           >
                             Reset Prompt
@@ -1265,7 +1291,7 @@ export default function MyMascot() {
                       ) : generationMode === 'aicredits_flux' ? (
                         <>
                           <Zap size={16} color="#facc15" />
-                          <span>Generate with AICredits FLUX Schnell (~₹0.20)</span>
+                          <span>Generate 3×3 Vector Mascot &amp; 18 Stickers (~₹0.20)</span>
                         </>
                       ) : generationMode === 'flux_vector' ? (
                         <>

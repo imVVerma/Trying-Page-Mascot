@@ -216,35 +216,284 @@ export function createDieCutStickerBust(imgElement: HTMLImageElement, size: numb
   return canvas;
 }
 
+/**
+ * Helper to identify bright magenta chroma-key background pixels (#FF00FF).
+ */
+function isMagentaChroma(r: number, g: number, b: number): boolean {
+  const dist = Math.hypot(r - 255, g - 0, b - 255);
+  return (dist < 140 && g < 115) || (r > 165 && g < 100 && b > 165 && Math.abs(r - b) < 65);
+}
+
+/**
+ * Extracts and processes an AI-generated 3x3 sprite sheet on a #FF00FF magenta chroma-key background.
+ * If the image is detected as a 3x3 chroma-key grid, it removes the background cleanly
+ * and builds authentic 9-perspective directions and 9-expression reaction sheets.
+ */
+async function extractChromaKeySpriteSheets(
+  imgElement: HTMLImageElement
+): Promise<GeneratedMascotSheets | null> {
+  const w = imgElement.naturalWidth || imgElement.width || 1024;
+  const h = imgElement.naturalHeight || imgElement.height || 1024;
+
+  const testCanvas = document.createElement('canvas');
+  testCanvas.width = w;
+  testCanvas.height = h;
+  const tCtx = testCanvas.getContext('2d', { willReadFrequently: true });
+  if (!tCtx) return null;
+
+  tCtx.drawImage(imgElement, 0, 0, w, h);
+  const imgData = tCtx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+
+  // 1. Perimeter sampling to verify magenta chroma-key background
+  let magentaCount = 0;
+  const samples = 60;
+  for (let i = 0; i < samples; i++) {
+    const x = Math.floor((i / samples) * (w - 4)) + 2;
+    // Top border
+    let idx = (2 * w + x) * 4;
+    if (isMagentaChroma(data[idx], data[idx + 1], data[idx + 2])) magentaCount++;
+    // Bottom border
+    idx = ((h - 3) * w + x) * 4;
+    if (isMagentaChroma(data[idx], data[idx + 1], data[idx + 2])) magentaCount++;
+  }
+
+  // If less than 25% of outer border is magenta, this is a standard photo or non-chroma image
+  if (magentaCount / (samples * 2) < 0.25) {
+    return null;
+  }
+
+  // 2. Remove magenta chroma-key with edge alpha feathering
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const dist = Math.hypot(r - 255, g, b - 255);
+
+    if (dist < 115 && g < 95) {
+      data[i + 3] = 0;
+    } else if (dist < 165 && g < 130) {
+      const alpha = (dist - 115) / (165 - 115);
+      data[i + 3] = Math.round(data[i + 3] * Math.max(0, Math.min(1, alpha)));
+    }
+  }
+  tCtx.putImageData(imgData, 0, 0);
+
+  // 3. Assemble 1080x1080 3x3 Directions Sheet (Preserving the AI's 9 3D perspective angles)
+  const SHEET_SIZE = 1080;
+  const CELL_SIZE = 360;
+  const pad = 15;
+  const drawSize = CELL_SIZE - pad * 2; // 330px
+
+  const dirCanvas = document.createElement('canvas');
+  dirCanvas.width = SHEET_SIZE;
+  dirCanvas.height = SHEET_SIZE;
+  const dCtx = dirCanvas.getContext('2d');
+  if (!dCtx) return null;
+
+  const scw = w / 3;
+  const sch = h / 3;
+
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const sx = c * scw;
+      const sy = r * sch;
+      const dx = c * CELL_SIZE + pad;
+      const dy = r * CELL_SIZE + pad;
+      dCtx.drawImage(testCanvas, sx, sy, scw, sch, dx, dy, drawSize, drawSize);
+    }
+  }
+
+  // 4. Assemble 1080x1080 3x3 Reactions Sheet using center forward-facing cell (r=1, c=1)
+  const centerBustCanvas = document.createElement('canvas');
+  centerBustCanvas.width = drawSize;
+  centerBustCanvas.height = drawSize;
+  const cbCtx = centerBustCanvas.getContext('2d');
+  if (cbCtx) {
+    cbCtx.drawImage(testCanvas, scw, sch, scw, sch, 0, 0, drawSize, drawSize);
+  }
+
+  const feat = {
+    eyeLeft: { x: drawSize * 0.42, y: drawSize * 0.44 },
+    eyeRight: { x: drawSize * 0.58, y: drawSize * 0.44 },
+    eyeDistance: Math.round(drawSize * 0.16),
+    eyeTilt: 0,
+    nose: { x: drawSize * 0.5, y: drawSize * 0.5 },
+    mouth: { x: drawSize * 0.5, y: drawSize * 0.58 },
+    cheekLeft: { x: drawSize * 0.36, y: drawSize * 0.52 },
+    cheekRight: { x: drawSize * 0.64, y: drawSize * 0.52 },
+    faceCenter: { x: drawSize * 0.5, y: drawSize * 0.46 },
+    headSize: Math.round(drawSize * 0.48),
+  };
+
+  const reactCanvas = document.createElement('canvas');
+  reactCanvas.width = SHEET_SIZE;
+  reactCanvas.height = SHEET_SIZE;
+  const rCtx = reactCanvas.getContext('2d');
+  if (!rCtx) return null;
+
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      const idx = r * 3 + c;
+      const cx = c * CELL_SIZE + CELL_SIZE / 2;
+      const cy = r * CELL_SIZE + CELL_SIZE / 2;
+
+      rCtx.save();
+      rCtx.translate(cx, cy);
+      // Center base character bust
+      rCtx.drawImage(centerBustCanvas, -drawSize / 2, -drawSize / 2);
+      // Reaction vector overlays
+      renderReactionOverlays(rCtx, idx, feat, drawSize);
+      rCtx.restore();
+    }
+  }
+
+  return {
+    directionsUrl: dirCanvas.toDataURL('image/webp', 0.95),
+    reactionsUrl: reactCanvas.toDataURL('image/webp', 0.95),
+  };
+}
+
+/**
+ * Renders the 9 pro reaction overlays (blush, heart eyes, sparkle, wink, dizzy, etc.)
+ */
+function renderReactionOverlays(
+  rCtx: CanvasRenderingContext2D,
+  idx: number,
+  feat: any,
+  bustSize: number
+) {
+  const eyeLX = feat.eyeLeft.x - bustSize / 2;
+  const eyeLY = feat.eyeLeft.y - bustSize / 2;
+  const eyeRX = feat.eyeRight.x - bustSize / 2;
+  const eyeRY = feat.eyeRight.y - bustSize / 2;
+  const mouthX = feat.mouth.x - bustSize / 2;
+  const mouthY = feat.mouth.y - bustSize / 2;
+  const cheekLX = feat.cheekLeft.x - bustSize / 2;
+  const cheekLY = feat.cheekLeft.y - bustSize / 2;
+  const cheekRX = feat.cheekRight.x - bustSize / 2;
+  const cheekRY = feat.cheekRight.y - bustSize / 2;
+  const eyeDist = feat.eyeDistance;
+  const eyeTilt = feat.eyeTilt;
+  const fcX = feat.faceCenter.x - bustSize / 2;
+  const fcY = feat.faceCenter.y - bustSize / 2;
+  const hs = feat.headSize;
+
+  switch (idx) {
+    case 0: // 0: Blink (Relaxed Closed Eyelids & Blush)
+      drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+      drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+      drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.35);
+      drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.35);
+      break;
+
+    case 1: // 1: Heart Eyes (Glossy 3D Hearts & Twin Floating Hearts)
+      drawGlossyHeart(rCtx, eyeLX, eyeLY, eyeDist * 0.62, eyeTilt);
+      drawGlossyHeart(rCtx, eyeRX, eyeRY, eyeDist * 0.62, eyeTilt);
+      drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.48, hs * 0.2, '#f43f5e');
+      drawFloatingHeart(rCtx, fcX - hs * 0.52, fcY - hs * 0.38, hs * 0.16, '#fb7185');
+      break;
+
+    case 2: // 2: Sparkle (Golden 4-Point Anime Stars & Excited Eyes)
+      drawAnimeSparkleStar(rCtx, fcX - hs * 0.56, fcY - hs * 0.46, hs * 0.24, '#f59e0b');
+      drawAnimeSparkleStar(rCtx, fcX + hs * 0.58, fcY - hs * 0.36, hs * 0.2, '#fbbf24');
+      drawAnimeSparkleStar(rCtx, fcX + hs * 0.46, fcY + hs * 0.28, hs * 0.16, '#38bdf8');
+      drawAnimeSparkleStar(rCtx, fcX - hs * 0.46, fcY + hs * 0.34, hs * 0.14, '#fbbf24');
+      drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
+      drawEyeStarGleam(rCtx, eyeRX, eyeRY, eyeDist * 0.24);
+      break;
+
+    case 3: // 3: Surprised (Gasping 'O' Mouth & Comic Sweat Drop)
+      drawComicSweatDrop(rCtx, fcX + hs * 0.44, fcY - hs * 0.38, hs * 0.18);
+      drawGaspingMouth(rCtx, mouthX, mouthY, eyeDist * 0.24, eyeDist * 0.34);
+      break;
+
+    case 4: // 4: Wink (Playful Star Wink & Confident Smirk)
+      drawWinkingEye(rCtx, eyeRX, eyeRY, eyeDist * 0.46, eyeTilt);
+      drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
+      drawPlayfulSmirk(rCtx, mouthX, mouthY, eyeDist * 0.42);
+      drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.38, hs * 0.15, '#ec4899');
+      break;
+
+    case 5: // 5: Bashful (Deep Rose Blush & Shy Sweet Glance)
+      drawDeepBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.4);
+      drawDeepBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.4);
+      drawCuteSmile(rCtx, mouthX, mouthY, eyeDist * 0.35);
+      break;
+
+    case 6: // 6: Sleepy (Cyan Sleep Bubble & Floating "Zzz")
+      drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+      drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+      drawSleepBubble(rCtx, mouthX + eyeDist * 0.28, mouthY - eyeDist * 0.18, eyeDist * 0.38);
+      drawSleepyZzz(rCtx, fcX + hs * 0.5, fcY - hs * 0.46);
+      break;
+
+    case 7: // 7: Dizzy (Hypnosis Spiral Glasses, Orbiting Stars & Wavy Mouth)
+      drawHypnoSpiral(rCtx, eyeLX, eyeLY, eyeDist * 0.48);
+      drawHypnoSpiral(rCtx, eyeRX, eyeRY, eyeDist * 0.48);
+      drawAnimeSparkleStar(rCtx, fcX - hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
+      drawAnimeSparkleStar(rCtx, fcX, fcY - hs * 0.65, hs * 0.2, '#facc15');
+      drawAnimeSparkleStar(rCtx, fcX + hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
+      drawWavyDazedMouth(rCtx, mouthX, mouthY, eyeDist * 0.55);
+      break;
+
+    case 8: // 8: Delighted (Happy Arcs ^▽^ & Big Laughing Smile)
+      drawHappyEyeArc(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
+      drawHappyEyeArc(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
+      drawLaughingTeethMouth(rCtx, mouthX, mouthY, eyeDist * 0.52, eyeDist * 0.36);
+      drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.32);
+      drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.32);
+      break;
+  }
+}
+
 export async function generateSpriteSheetsFromPhoto(
   imgElement: HTMLImageElement
 ): Promise<GeneratedMascotSheets> {
+  // First, check if the image is an AI-generated 3x3 sprite sheet with #FF00FF chroma-key background
+  const chromaSheets = await extractChromaKeySpriteSheets(imgElement);
+  if (chromaSheets) {
+    return chromaSheets;
+  }
+
   const SHEET_SIZE = 1080;
   const CELL_SIZE = 360; // 3x3 grid
   const BUST_SIZE = 330; // Fills 92% of 360px cell (Bold Fox scale)!
 
-  const aiResult = await segmentAndExtractMascotBust(imgElement, BUST_SIZE);
-  const stickerBust = aiResult.bustCanvas;
-  const feat = aiResult.features;
+  let stickerBust: HTMLCanvasElement;
+  let feat: any;
+
+  try {
+    const aiResult = await segmentAndExtractMascotBust(imgElement, BUST_SIZE);
+    stickerBust = aiResult.bustCanvas;
+    feat = aiResult.features;
+  } catch (err) {
+    console.warn('AI portrait segmentation failed, falling back to local die-cut sticker bust:', err);
+    stickerBust = createDieCutStickerBust(imgElement, BUST_SIZE);
+    feat = {
+      eyeLeft: { x: BUST_SIZE * 0.42, y: BUST_SIZE * 0.44 },
+      eyeRight: { x: BUST_SIZE * 0.58, y: BUST_SIZE * 0.44 },
+      eyeDistance: Math.round(BUST_SIZE * 0.16),
+      eyeTilt: 0,
+      nose: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.5 },
+      mouth: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.58 },
+      cheekLeft: { x: BUST_SIZE * 0.36, y: BUST_SIZE * 0.52 },
+      cheekRight: { x: BUST_SIZE * 0.64, y: BUST_SIZE * 0.52 },
+      faceCenter: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.46 },
+      headSize: Math.round(BUST_SIZE * 0.48),
+    };
+  }
 
   const eyeLX = feat.eyeLeft.x - BUST_SIZE / 2;
   const eyeLY = feat.eyeLeft.y - BUST_SIZE / 2;
   const eyeRX = feat.eyeRight.x - BUST_SIZE / 2;
   const eyeRY = feat.eyeRight.y - BUST_SIZE / 2;
-  const mouthX = feat.mouth.x - BUST_SIZE / 2;
-  const mouthY = feat.mouth.y - BUST_SIZE / 2;
-  const cheekLX = feat.cheekLeft.x - BUST_SIZE / 2;
-  const cheekLY = feat.cheekLeft.y - BUST_SIZE / 2;
-  const cheekRX = feat.cheekRight.x - BUST_SIZE / 2;
-  const cheekRY = feat.cheekRight.y - BUST_SIZE / 2;
   const eyeDist = feat.eyeDistance;
-  const eyeTilt = feat.eyeTilt;
-  const fcX = feat.faceCenter.x - BUST_SIZE / 2;
-  const fcY = feat.faceCenter.y - BUST_SIZE / 2;
-  const hs = feat.headSize;
 
   // -------------------------------------------------------------
-  // 1. Generate 3x3 DIRECTIONS Sheet (9 Head Angles)
+  // 1. Generate 3x3 DIRECTIONS Sheet (9 Head & Gaze Angles)
+  // Torso is anchored and stable: NO whole-body flipping or spinning!
+  // Head has subtle neck-anchored 2.5D parallax (max 2-3px) + isolated pupil gaze tracking!
   // -------------------------------------------------------------
   const dirCanvas = document.createElement('canvas');
   dirCanvas.width = SHEET_SIZE;
@@ -252,32 +501,57 @@ export async function generateSpriteSheetsFromPhoto(
   const dCtx = dirCanvas.getContext('2d');
   if (!dCtx) throw new Error('Could not get directions canvas context');
 
-  // [dx, dy, rotateDeg, scaleX, scaleY]
-  const DIRECTION_TRANSFORMS = [
-    [-14, -10, -4, 0.97, 1.02], // 0: Top-Left
-    [0, -14, 0, 0.96, 1.03],    // 1: Top
-    [14, -10, 4, 0.97, 1.02],   // 2: Top-Right
-    [-16, 0, -3, 0.95, 1.0],    // 3: Left
-    [0, 0, 0, 1.0, 1.0],        // 4: Center (Dead-zone)
-    [16, 0, 3, 0.95, 1.0],      // 5: Right
-    [-12, 12, -3, 1.02, 0.97],  // 6: Bottom-Left
-    [0, 15, 0, 1.03, 0.96],     // 7: Bottom
-    [12, 12, 3, 1.02, 0.97],    // 8: Bottom-Right
+  // [deg, scaleX, scaleY, dy, dx, gazeY]
+  // deg: head turn angle around neck pivot (degrees)
+  // scaleX, scaleY: 3D perspective foreshortening
+  // dy, dx: subtle vertical lift/dip and horizontal shift (minimal so torso stays anchored)
+  const DIRECTION_CONFIGS = [
+    [-2.8, 0.96, 0.98, -2.5, -1.0, -0.85], // 0: Top-Left
+    [0.0,  1.01, 0.97, -3.5,  0.0, -1.0],  // 1: Top (Up)
+    [2.8,  0.96, 0.98, -2.5,  1.0, -0.85], // 2: Top-Right
+    [-3.5, 0.94, 1.00,  0.0, -1.5,  0.0],  // 3: Left
+    [0.0,  1.00, 1.00,  0.0,  0.0,  0.0],  // 4: Center (Forward Look)
+    [3.5,  0.94, 1.00,  0.0,  1.5,  0.0],  // 5: Right
+    [-2.5, 0.96, 0.98,  2.5, -1.0,  0.85], // 6: Bottom-Left
+    [0.0,  1.01, 0.97,  3.5,  0.0,  1.0],  // 7: Bottom (Down)
+    [2.5,  0.96, 0.98,  2.5,  1.0,  0.85], // 8: Bottom-Right
   ];
 
   for (let r = 0; r < 3; r++) {
     for (let c = 0; c < 3; c++) {
       const idx = r * 3 + c;
-      const [dx, dy, deg, sxScale, syScale] = DIRECTION_TRANSFORMS[idx];
+      const [deg, scaleX, scaleY, dy, dx, gazeY] = DIRECTION_CONFIGS[idx];
 
       const cx = c * CELL_SIZE + CELL_SIZE / 2;
       const cy = r * CELL_SIZE + CELL_SIZE / 2;
 
       dCtx.save();
-      dCtx.translate(cx + dx, cy + dy);
-      dCtx.rotate((deg * Math.PI) / 180);
-      dCtx.scale(sxScale, syScale);
+      dCtx.translate(cx, cy);
+
+      // Pivot placed at the base of the neck / upper chest (BUST_SIZE * 0.38)
+      // This ensures shoulders and chest base stay locked in position (matching Fox/Bear)
+      const pivotY = BUST_SIZE * 0.38;
+      dCtx.translate(dx, dy + pivotY);
+      if (deg !== 0) {
+        dCtx.rotate((deg * Math.PI) / 180);
+      }
+      dCtx.scale(scaleX, scaleY);
+      dCtx.translate(0, -pivotY);
+
       dCtx.drawImage(stickerBust, -BUST_SIZE / 2, -BUST_SIZE / 2);
+
+      // Subtle eyelid contour only when looking down (never stamps fake pupils)
+      drawDirectionalGaze(
+        dCtx,
+        eyeLX,
+        eyeLY,
+        eyeRX,
+        eyeRY,
+        eyeDist,
+        0,
+        gazeY
+      );
+
       dCtx.restore();
     }
   }
@@ -304,72 +578,7 @@ export async function generateSpriteSheetsFromPhoto(
       rCtx.drawImage(stickerBust, -BUST_SIZE / 2, -BUST_SIZE / 2);
 
       // PRO STICKER VECTOR OVERLAYS (Accurately targeted to face landmarks)
-      switch (idx) {
-        case 0: // 0: Blink (Relaxed Closed Eyelids & Blush)
-          drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
-          drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
-          drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.35);
-          drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.35);
-          break;
-
-        case 1: // 1: Heart Eyes (Glossy 3D Hearts & Twin Floating Hearts)
-          drawGlossyHeart(rCtx, eyeLX, eyeLY, eyeDist * 0.62, eyeTilt);
-          drawGlossyHeart(rCtx, eyeRX, eyeRY, eyeDist * 0.62, eyeTilt);
-          drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.48, hs * 0.2, '#f43f5e');
-          drawFloatingHeart(rCtx, fcX - hs * 0.52, fcY - hs * 0.38, hs * 0.16, '#fb7185');
-          break;
-
-        case 2: // 2: Sparkle (Golden 4-Point Anime Stars & Excited Eyes)
-          drawAnimeSparkleStar(rCtx, fcX - hs * 0.56, fcY - hs * 0.46, hs * 0.24, '#f59e0b');
-          drawAnimeSparkleStar(rCtx, fcX + hs * 0.58, fcY - hs * 0.36, hs * 0.2, '#fbbf24');
-          drawAnimeSparkleStar(rCtx, fcX + hs * 0.46, fcY + hs * 0.28, hs * 0.16, '#38bdf8');
-          drawAnimeSparkleStar(rCtx, fcX - hs * 0.46, fcY + hs * 0.34, hs * 0.14, '#fbbf24');
-          drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
-          drawEyeStarGleam(rCtx, eyeRX, eyeRY, eyeDist * 0.24);
-          break;
-
-        case 3: // 3: Surprised (Gasping 'O' Mouth & Comic Sweat Drop)
-          drawComicSweatDrop(rCtx, fcX + hs * 0.44, fcY - hs * 0.38, hs * 0.18);
-          drawGaspingMouth(rCtx, mouthX, mouthY, eyeDist * 0.24, eyeDist * 0.34);
-          break;
-
-        case 4: // 4: Wink (Playful Star Wink & Confident Smirk)
-          drawWinkingEye(rCtx, eyeRX, eyeRY, eyeDist * 0.46, eyeTilt);
-          drawEyeStarGleam(rCtx, eyeLX, eyeLY, eyeDist * 0.24);
-          drawPlayfulSmirk(rCtx, mouthX, mouthY, eyeDist * 0.42);
-          drawFloatingHeart(rCtx, fcX + hs * 0.52, fcY - hs * 0.38, hs * 0.15, '#ec4899');
-          break;
-
-        case 5: // 5: Bashful (Deep Rose Blush & Shy Sweet Glance)
-          drawDeepBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.4);
-          drawDeepBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.4);
-          drawCuteSmile(rCtx, mouthX, mouthY, eyeDist * 0.35);
-          break;
-
-        case 6: // 6: Sleepy (Cyan Sleep Bubble & Floating "Zzz")
-          drawClosedEyelids(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
-          drawClosedEyelids(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
-          drawSleepBubble(rCtx, mouthX + eyeDist * 0.28, mouthY - eyeDist * 0.18, eyeDist * 0.38);
-          drawSleepyZzz(rCtx, fcX + hs * 0.5, fcY - hs * 0.46);
-          break;
-
-        case 7: // 7: Dizzy (Hypnosis Spiral Glasses, Orbiting Stars & Wavy Mouth)
-          drawHypnoSpiral(rCtx, eyeLX, eyeLY, eyeDist * 0.48);
-          drawHypnoSpiral(rCtx, eyeRX, eyeRY, eyeDist * 0.48);
-          drawAnimeSparkleStar(rCtx, fcX - hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
-          drawAnimeSparkleStar(rCtx, fcX, fcY - hs * 0.65, hs * 0.2, '#facc15');
-          drawAnimeSparkleStar(rCtx, fcX + hs * 0.42, fcY - hs * 0.58, hs * 0.16, '#eab308');
-          drawWavyDazedMouth(rCtx, mouthX, mouthY, eyeDist * 0.55);
-          break;
-
-        case 8: // 8: Delighted (Happy Arcs ^▽^ & Big Laughing Smile)
-          drawHappyEyeArc(rCtx, eyeLX, eyeLY, eyeDist * 0.44, eyeTilt);
-          drawHappyEyeArc(rCtx, eyeRX, eyeRY, eyeDist * 0.44, eyeTilt);
-          drawLaughingTeethMouth(rCtx, mouthX, mouthY, eyeDist * 0.52, eyeDist * 0.36);
-          drawAnimeBlush(rCtx, cheekLX, cheekLY, eyeDist * 0.32);
-          drawAnimeBlush(rCtx, cheekRX, cheekRY, eyeDist * 0.32);
-          break;
-      }
+      renderReactionOverlays(rCtx, idx, feat, BUST_SIZE);
 
       rCtx.restore();
     }
@@ -384,6 +593,42 @@ export async function generateSpriteSheetsFromPhoto(
 // -------------------------------------------------------------
 // Pro Sticker Graphic Vector Renderers
 // -------------------------------------------------------------
+
+/**
+ * Applies subtle soft eyelid contour adjustments when looking downwards.
+ * Never stamps opaque artificial black pupils over the character's already-drawn eyes.
+ */
+function drawDirectionalGaze(
+  ctx: CanvasRenderingContext2D,
+  eyeLX: number,
+  eyeLY: number,
+  eyeRX: number,
+  eyeRY: number,
+  eyeDist: number,
+  _gazeX: number,
+  gazeY: number
+) {
+  // Only apply subtle soft eyelid contour when looking downward (never paint fake pupils over drawn eyes!)
+  if (gazeY <= 0.4) return;
+
+  const eyeRadius = Math.max(6, eyeDist * 0.16);
+  const eyes = [
+    { x: eyeLX, y: eyeLY },
+    { x: eyeRX, y: eyeRY },
+  ];
+
+  ctx.save();
+  for (const eye of eyes) {
+    ctx.save();
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.45)';
+    ctx.beginPath();
+    ctx.arc(eye.x, eye.y - eyeRadius * 0.15, eyeRadius * 0.95, 0.85 * Math.PI, 0.15 * Math.PI, true);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
 
 function drawGlossyHeart(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, tilt: number = 0) {
   ctx.save();
