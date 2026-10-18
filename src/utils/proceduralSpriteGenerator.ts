@@ -1,14 +1,108 @@
 /**
  * Client-Side Procedural 3x3 Sprite Sheet & Die-Cut Sticker Generator.
- * Transforms any user photo into authentic WhatsApp/Telegram-style stickers
- * and 3x3 head-direction / expression sprite sheets.
+ *
+ * This is the FALLBACK path. When the server returns real model-drawn sprite
+ * sheets (see `buildMascotAssets`) those are used directly, because only an
+ * image model can draw nine genuinely different head angles. The procedural rig
+ * below rotates one flat bust, which reads as "tilted" rather than "turned", so
+ * it is a fallback and not the intended output.
  */
 
 import { segmentAndExtractMascotBust } from './aiPortraitSegmenter';
+import {
+  keyOutChroma,
+  extractGridSheet,
+  frameAsBust,
+  applyDieCut,
+  loadImage,
+} from './chromaKey';
 
 export interface GeneratedMascotSheets {
   directionsUrl: string;
   reactionsUrl: string;
+}
+
+export interface SpriteGenerationOptions {
+  /**
+   * True when the source image is an AI-rendered illustration rather than a
+   * photograph. Illustrations are chroma-keyed directly — running MediaPipe
+   * selfie segmentation (a photo matting model) over a drawing produces torn
+   * edges, unmatted background and speckle artifacts.
+   */
+  isIllustration?: boolean;
+}
+
+export interface MascotAssetInput {
+  /** Canonical bust data URI from the server. */
+  bust: string;
+  /** 3x3 head-angle sheet, when the model produced a usable one. */
+  directions?: string | null;
+  /** 3x3 expression sheet, when the model produced a usable one. */
+  reactions?: string | null;
+}
+
+export interface MascotAssets {
+  directionsUrl: string;
+  reactionsUrl: string;
+  previewUrl: string;
+  /** Which sheets came from the model vs. the procedural fallback. */
+  source: { directions: 'ai' | 'procedural'; reactions: 'ai' | 'procedural' };
+}
+
+const SHEET_SIZE = 1080;
+const BUST_SIZE = 330;
+
+/**
+ * Builds the final 1080x1080 sheets from the server's generated assets.
+ *
+ * Any sheet the model failed to produce (or produced badly) is rebuilt with the
+ * procedural rig from the canonical bust, so the mascot always has both sheets.
+ */
+export async function buildMascotAssets(input: MascotAssetInput): Promise<MascotAssets> {
+  const bustImg = await loadImage(input.bust);
+
+  const directions = await resolveSheet(input.directions, bustImg, 'directions');
+  const reactions = await resolveSheet(input.reactions, bustImg, 'reactions');
+
+  return {
+    directionsUrl: directions.url,
+    reactionsUrl: reactions.url,
+    previewUrl: input.bust,
+    source: { directions: directions.source, reactions: reactions.source },
+  };
+}
+
+/** Uses a model-drawn sheet when it keys and splits cleanly, otherwise falls back. */
+async function resolveSheet(
+  sheetUrl: string | null | undefined,
+  bustImg: HTMLImageElement,
+  kind: 'directions' | 'reactions'
+): Promise<{ url: string; source: 'ai' | 'procedural' }> {
+  if (sheetUrl) {
+    try {
+      const img = await loadImage(sheetUrl);
+      const keyed = keyOutChroma(img);
+      if (keyed) {
+        const sheet = extractGridSheet(keyed, SHEET_SIZE);
+        if (sheet.ok) {
+          return { url: sheet.canvas.toDataURL('image/webp', 0.95), source: 'ai' };
+        }
+        console.warn(
+          `[mascot] ${kind} sheet had ${sheet.emptyCells.length} empty cell(s); using fallback`
+        );
+      } else {
+        console.warn(`[mascot] ${kind} sheet was not magenta-backed; using fallback`);
+      }
+    } catch (err) {
+      console.warn(`[mascot] ${kind} sheet failed to load; using fallback`, err);
+    }
+  }
+
+  const sheets = await generateSpriteSheetsFromPhoto(bustImg, { isIllustration: true });
+  return {
+    url: kind === 'directions' ? sheets.directionsUrl : sheets.reactionsUrl,
+    source: 'procedural',
+  };
 }
 
 /**
@@ -447,8 +541,28 @@ function renderReactionOverlays(
   }
 }
 
+/**
+ * Chibi art convention for facial anchors: eyes at 44% height, 16% apart.
+ * Matches the reference mascot sheets. Used when no real landmarks are available.
+ */
+function defaultFeatures(size: number) {
+  return {
+    eyeLeft: { x: size * 0.42, y: size * 0.44 },
+    eyeRight: { x: size * 0.58, y: size * 0.44 },
+    eyeDistance: Math.round(size * 0.16),
+    eyeTilt: 0,
+    nose: { x: size * 0.5, y: size * 0.5 },
+    mouth: { x: size * 0.5, y: size * 0.58 },
+    cheekLeft: { x: size * 0.36, y: size * 0.52 },
+    cheekRight: { x: size * 0.64, y: size * 0.52 },
+    faceCenter: { x: size * 0.5, y: size * 0.46 },
+    headSize: Math.round(size * 0.48),
+  };
+}
+
 export async function generateSpriteSheetsFromPhoto(
-  imgElement: HTMLImageElement
+  imgElement: HTMLImageElement,
+  options: SpriteGenerationOptions = {}
 ): Promise<GeneratedMascotSheets> {
   // First, check if the image is an AI-generated 3x3 sprite sheet with #FF00FF chroma-key background
   const chromaSheets = await extractChromaKeySpriteSheets(imgElement);
@@ -458,30 +572,32 @@ export async function generateSpriteSheetsFromPhoto(
 
   const SHEET_SIZE = 1080;
   const CELL_SIZE = 360; // 3x3 grid
-  const BUST_SIZE = 330; // Fills 92% of 360px cell (Bold Fox scale)!
 
   let stickerBust: HTMLCanvasElement;
   let feat: any;
 
-  try {
-    const aiResult = await segmentAndExtractMascotBust(imgElement, BUST_SIZE);
-    stickerBust = aiResult.bustCanvas;
-    feat = aiResult.features;
-  } catch (err) {
-    console.warn('AI portrait segmentation failed, falling back to local die-cut sticker bust:', err);
-    stickerBust = createDieCutStickerBust(imgElement, BUST_SIZE);
-    feat = {
-      eyeLeft: { x: BUST_SIZE * 0.42, y: BUST_SIZE * 0.44 },
-      eyeRight: { x: BUST_SIZE * 0.58, y: BUST_SIZE * 0.44 },
-      eyeDistance: Math.round(BUST_SIZE * 0.16),
-      eyeTilt: 0,
-      nose: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.5 },
-      mouth: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.58 },
-      cheekLeft: { x: BUST_SIZE * 0.36, y: BUST_SIZE * 0.52 },
-      cheekRight: { x: BUST_SIZE * 0.64, y: BUST_SIZE * 0.52 },
-      faceCenter: { x: BUST_SIZE * 0.5, y: BUST_SIZE * 0.46 },
-      headSize: Math.round(BUST_SIZE * 0.48),
-    };
+  if (options.isIllustration) {
+    // A rendered illustration, not a photograph. MediaPipe selfie segmentation is a
+    // photo-matting model and produces torn edges + unmatted background on drawings,
+    // so key the flat chroma background out directly instead.
+    const keyed = keyOutChroma(imgElement);
+    if (keyed) {
+      stickerBust = applyDieCut(frameAsBust(keyed, BUST_SIZE));
+      feat = defaultFeatures(BUST_SIZE);
+    } else {
+      stickerBust = createDieCutStickerBust(imgElement, BUST_SIZE);
+      feat = defaultFeatures(BUST_SIZE);
+    }
+  } else {
+    try {
+      const aiResult = await segmentAndExtractMascotBust(imgElement, BUST_SIZE);
+      stickerBust = aiResult.bustCanvas;
+      feat = aiResult.features;
+    } catch (err) {
+      console.warn('AI portrait segmentation failed, falling back to local die-cut sticker bust:', err);
+      stickerBust = createDieCutStickerBust(imgElement, BUST_SIZE);
+      feat = defaultFeatures(BUST_SIZE);
+    }
   }
 
   const eyeLX = feat.eyeLeft.x - BUST_SIZE / 2;

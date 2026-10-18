@@ -51,14 +51,13 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 /**
- * Slices two 3x3 sprite sheets (directions and reactions) into 18 individual 512x512 transparent stickers.
- * Supports rendering with active art style filter shaders!
+ * Slices two 3x3 sprite sheets (directions and reactions) into 18 individual
+ * 512x512 transparent WebP stickers.
  */
 export async function sliceSpriteSheetsToStickers(
   directionsUrl: string,
   reactionsUrl: string,
-  characterName: string = 'mascot',
-  style: string = 'colour'
+  characterName: string = 'mascot'
 ): Promise<StickerItem[]> {
   const [directionsImg, reactionsImg] = await Promise.all([
     loadImage(directionsUrl),
@@ -68,36 +67,14 @@ export async function sliceSpriteSheetsToStickers(
   const stickers: StickerItem[] = [];
   const exportSize = 512;
 
-  // Determine canvas filter for the chosen style
-  // If the asset URL already contains `-${style}-` (native drawn sheet), filter is 'none'
-  const getCanvasFilter = (url: string): string => {
-    if (url.includes(`-${style}-`) || style === 'colour') return 'none';
-    switch (style) {
-      case 'ink':
-        return 'grayscale(100%) contrast(280%) brightness(105%)';
-      case 'sketch':
-        return 'grayscale(100%) contrast(150%) brightness(102%)';
-      case 'riso':
-        return 'sepia(100%) hue-rotate(295deg) saturate(320%) contrast(135%)';
-      case 'paper':
-        return 'contrast(125%) saturate(115%)';
-      case 'pixel':
-        return 'contrast(140%) saturate(130%)';
-      default:
-        return 'none';
-    }
-  };
-
   // Helper to slice a 3x3 sheet
   const sliceSheet = async (
     img: HTMLImageElement,
     type: 'direction' | 'reaction',
-    metaList: typeof DIRECTION_NAMES | typeof REACTION_NAMES,
-    sourceUrl: string
+    metaList: typeof DIRECTION_NAMES | typeof REACTION_NAMES
   ) => {
     const cellW = img.naturalWidth / 3;
     const cellH = img.naturalHeight / 3;
-    const filter = getCanvasFilter(sourceUrl);
 
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
@@ -114,18 +91,10 @@ export async function sliceSpriteSheetsToStickers(
         // Clear transparent background
         ctx.clearRect(0, 0, exportSize, exportSize);
 
-        if (filter !== 'none') {
-          ctx.filter = filter;
-        }
-
         // Draw source cell scaled to 512x512
         const sx = c * cellW;
         const sy = r * cellH;
         ctx.drawImage(img, sx, sy, cellW, cellH, 0, 0, exportSize, exportSize);
-
-        if (filter !== 'none') {
-          ctx.filter = 'none';
-        }
 
         const blob = await new Promise<Blob>((res) => {
           canvas.toBlob(
@@ -137,17 +106,16 @@ export async function sliceSpriteSheetsToStickers(
 
         const dataUrl = canvas.toDataURL('image/webp', 0.95);
         const safeName = characterName.toLowerCase().replace(/[^a-z0-9]/g, '_');
-        const stylePrefix = style && style !== 'colour' ? `${style}_` : '';
 
         stickers.push({
-          id: `${meta.id}_${style}`,
+          id: meta.id,
           name: meta.label,
           type,
           row: r,
           col: c,
           label: meta.label,
           expressionOrAngle: 'expr' in meta ? meta.expr : meta.angle,
-          filename: `${safeName}_${stylePrefix}${meta.filename}.webp`,
+          filename: `${safeName}_${meta.filename}.webp`,
           dataUrl,
           blob,
         });
@@ -155,8 +123,8 @@ export async function sliceSpriteSheetsToStickers(
     }
   };
 
-  await sliceSheet(directionsImg, 'direction', DIRECTION_NAMES, directionsUrl);
-  await sliceSheet(reactionsImg, 'reaction', REACTION_NAMES, reactionsUrl);
+  await sliceSheet(directionsImg, 'direction', DIRECTION_NAMES);
+  await sliceSheet(reactionsImg, 'reaction', REACTION_NAMES);
 
   return stickers;
 }

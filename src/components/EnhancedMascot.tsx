@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 export const DIRECTIONS = [
   'up-left',
@@ -26,9 +26,8 @@ export const REACTIONS = [
 
 export type Direction = (typeof DIRECTIONS)[number];
 export type Reaction = (typeof REACTIONS)[number];
-export type ArtStyle = 'colour' | 'ink' | 'sketch' | 'riso' | 'paper' | 'pixel';
 
-// Clockwise from right for atan2 (y pointing down)
+/** Clockwise from right, matching atan2 with y pointing down. */
 const CLOCKWISE: Direction[] = [
   'right',
   'down-right',
@@ -42,14 +41,13 @@ const CLOCKWISE: Direction[] = [
 
 const SECTOR = (Math.PI * 2) / CLOCKWISE.length;
 const HYSTERESIS = 0.12;
-const DEAD_ZONE = 70;
 
-const BOOP_PAYOFF = 130;
-const BOOP_END = 620;
+/** Dead-zone scales with the mascot so the feel is the same at any size. */
+const DEAD_ZONE_RATIO = 0.42;
+const MIN_DEAD_ZONE = 48;
+
+const REACTION_DWELL_MS = 900;
 const SQUASH_MS = 420;
-const DIZZY_AFTER = 4;
-const DIZZY_WINDOW = 2400; // was 1600; giving users 2.4s to click 4 times comfortably
-const DIZZY_END = 3200;    // was 1200; giving users 3.2s of dizzy expression
 
 const SQUASH_KEYFRAMES: Keyframe[] = [
   { transform: 'scale(1, 1)', easing: 'ease-in' },
@@ -69,54 +67,14 @@ function wrapAngle(angle: number) {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
 }
 
-export function getStyleFilter(style: ArtStyle, url?: string): React.CSSProperties {
-  // If the asset URL already contains `-${style}-` (e.g. fox-ink-directions.webp),
-  // the art style is natively baked into the image, so skip the CSS filter.
-  if (url && url.includes(`-${style}-`)) {
-    return { filter: 'none' };
-  }
-
-  switch (style) {
-    case 'ink':
-      return {
-        filter: 'grayscale(100%) contrast(280%) brightness(105%)',
-      };
-    case 'sketch':
-      return {
-        filter: 'grayscale(100%) contrast(150%) brightness(102%) drop-shadow(1px 1px 0px rgba(0,0,0,0.25))',
-      };
-    case 'riso':
-      return {
-        filter: 'sepia(100%) hue-rotate(295deg) saturate(320%) contrast(135%)',
-      };
-    case 'paper':
-      return {
-        filter: 'contrast(125%) saturate(115%) drop-shadow(2px 3px 2px rgba(0,0,0,0.4))',
-      };
-    case 'pixel':
-      return {
-        imageRendering: 'pixelated',
-        filter: 'contrast(140%) saturate(130%)',
-      };
-    case 'colour':
-    default:
-      return {
-        filter: 'none',
-      };
-  }
-}
-
 export interface EnhancedMascotProps {
   directions: string;
   reactions: string;
   size?: number;
   className?: string;
   label?: string;
-  artStyle?: ArtStyle;
-  controlledReaction?: Reaction | null;
-  onBoop?: (count: number, isDizzy: boolean, activeReaction: Reaction | null) => void;
-  onDirectionChange?: (dir: Direction, angleDeg: number, distance: number) => void;
-  onReactionChange?: (reaction: Reaction | null) => void;
+  /** Fired when the mascot is tapped. Omit to render a static, non-interactive mascot. */
+  onBoop?: () => void;
 }
 
 export function EnhancedMascot({
@@ -125,132 +83,98 @@ export function EnhancedMascot({
   size = 140,
   className = '',
   label = 'mascot',
-  artStyle = 'colour',
-  controlledReaction = null,
   onBoop,
-  onDirectionChange,
-  onReactionChange,
 }: EnhancedMascotProps) {
-  const containerRef = useRef<HTMLButtonElement>(null);
+  const containerRef = useRef<HTMLElement>(null);
   const squashRef = useRef<HTMLSpanElement>(null);
   const timersRef = useRef<number[]>([]);
-  const boopsRef = useRef({ count: 0, at: 0, cycleIdx: 0 });
+  const cycleRef = useRef(0);
+
+  // Keep mutable inputs in refs so the pointer listener is attached exactly once
+  // instead of being torn down and re-added on every render.
+  const sizeRef = useRef(size);
+  const onBoopRef = useRef(onBoop);
+  useEffect(() => {
+    sizeRef.current = size;
+    onBoopRef.current = onBoop;
+  });
 
   const [direction, setDirection] = useState<Direction>('center');
-  const [internalReaction, setInternalReaction] = useState<Reaction | null>(null);
-  const [imagesLoaded, setImagesLoaded] = useState(false);
+  const [reaction, setReaction] = useState<Reaction | null>(null);
+  const [ready, setReady] = useState(false);
   const [activeDirections, setActiveDirections] = useState(directions);
   const [activeReactions, setActiveReactions] = useState(reactions);
 
-  useEffect(() => {
-    setActiveDirections(directions);
-  }, [directions]);
+  useEffect(() => setActiveDirections(directions), [directions]);
+  useEffect(() => setActiveReactions(reactions), [reactions]);
 
-  useEffect(() => {
-    setActiveReactions(reactions);
-  }, [reactions]);
-
-  // Preload & decode images to completely prevent flicker, with robust fallback on 404
+  // Preload so the mascot never flashes while swapping sprites.
   useEffect(() => {
     let cancelled = false;
-    const preload = async () => {
-      try {
-        const dImg = new Image();
-        dImg.crossOrigin = 'anonymous';
-        dImg.src = directions;
-        dImg.onerror = () => {
-          // If a styled variant fails to load (e.g., bear-ink-directions.webp),
-          // fallback to base colour sheet (e.g., bear-directions.webp)
-          const fallback = directions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
-          if (fallback !== directions && !cancelled) {
-            console.warn(`[EnhancedMascot] Falling back from ${directions} to ${fallback}`);
-            setActiveDirections(fallback);
-          }
-        };
+    setReady(false);
 
-        const rImg = new Image();
-        rImg.crossOrigin = 'anonymous';
-        rImg.src = reactions;
-        rImg.onerror = () => {
-          const fallback = reactions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
-          if (fallback !== reactions && !cancelled) {
-            console.warn(`[EnhancedMascot] Falling back from ${reactions} to ${fallback}`);
-            setActiveReactions(fallback);
-          }
-        };
+    const load = (src: string, onError: () => void) =>
+      new Promise<void>((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onerror = onError;
+        img.onload = () => resolve();
+        img.src = src;
+        if (img.decode) img.decode().then(resolve, () => resolve());
+      });
 
-        await Promise.allSettled([
-          dImg.decode ? dImg.decode() : Promise.resolve(),
-          rImg.decode ? rImg.decode() : Promise.resolve(),
-        ]);
+    Promise.allSettled([
+      load(directions, () => {
+        // Styled variants are optional; fall back to the base sheet.
+        const fallback = directions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
+        if (fallback !== directions && !cancelled) setActiveDirections(fallback);
+      }),
+      load(reactions, () => {
+        const fallback = reactions.replace(/-(?:ink|sketch|riso|paper|pixel)-/, '-');
+        if (fallback !== reactions && !cancelled) setActiveReactions(fallback);
+      }),
+    ]).then(() => {
+      if (!cancelled) setReady(true);
+    });
 
-        if (!cancelled) {
-          setImagesLoaded(true);
-        }
-      } catch {
-        if (!cancelled) setImagesLoaded(true);
-      }
-    };
-
-    preload();
     return () => {
       cancelled = true;
     };
   }, [directions, reactions]);
 
-  // Active reaction: controlled prop takes precedence, otherwise internal boop reaction
-  const activeReaction = controlledReaction !== null ? controlledReaction : internalReaction;
-
+  // Cursor tracking: attached once, reads size from a ref.
   useEffect(() => {
-    onReactionChange?.(activeReaction);
-  }, [activeReaction, onReactionChange]);
-
-  // Clean up timers on unmount
-  useEffect(() => {
-    return () => {
-      timersRef.current.forEach(window.clearTimeout);
-    };
-  }, []);
-
-  // Aiming logic with 70px dead-zone and sector hysteresis
-  useEffect(() => {
-    if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
-      return;
-    }
+    const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    if (!supportsHover) return;
 
     let sector = -1;
     let pointer: { x: number; y: number } | null = null;
 
     const aim = () => {
-      const button = containerRef.current;
-      if (!button || !pointer) return;
+      const node = containerRef.current;
+      if (!node || !pointer) return;
 
-      const box = button.getBoundingClientRect();
-      const centerX = box.left + box.width / 2;
-      const centerY = box.top + box.height / 2;
-      const dx = pointer.x - centerX;
-      const dy = pointer.y - centerY;
+      const box = node.getBoundingClientRect();
+      const dx = pointer.x - (box.left + box.width / 2);
+      const dy = pointer.y - (box.top + box.height / 2);
+
       const dist = Math.hypot(dx, dy);
-
       const rawAngle = Math.atan2(dy, dx);
-      const angleDeg = Math.round(((rawAngle * 180) / Math.PI + 360) % 360);
+      const deadZone = Math.max(MIN_DEAD_ZONE, sizeRef.current * DEAD_ZONE_RATIO);
 
-      if (dist < DEAD_ZONE) {
+      if (dist < deadZone) {
         sector = -1;
         setDirection('center');
-        onDirectionChange?.('center', angleDeg, dist);
         return;
       }
 
+      // Hysteresis keeps the sprite from flickering between two adjacent sectors.
       if (sector !== -1 && Math.abs(wrapAngle(rawAngle - sector * SECTOR)) < SECTOR / 2 + HYSTERESIS) {
-        onDirectionChange?.(CLOCKWISE[sector], angleDeg, dist);
         return;
       }
 
       sector = (Math.round(rawAngle / SECTOR) + CLOCKWISE.length) % CLOCKWISE.length;
-      const newDir = CLOCKWISE[sector];
-      setDirection(newDir);
-      onDirectionChange?.(newDir, angleDeg, dist);
+      setDirection(CLOCKWISE[sector]);
     };
 
     const onPointerMove = (event: PointerEvent) => {
@@ -265,52 +189,35 @@ export function EnhancedMascot({
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('scroll', aim);
     };
-  }, [onDirectionChange]);
+  }, []);
 
-  // Enhanced Boop Handler: cycles through ALL 9 expressions smoothly and supports Dizzy state
+  useEffect(
+    () => () => {
+      timersRef.current.forEach(window.clearTimeout);
+    },
+    []
+  );
+
+  // Tapping cycles through the expressions.
   const handleBoop = useCallback(() => {
     timersRef.current.forEach(window.clearTimeout);
     timersRef.current = [];
 
-    const later = (ms: number, next: Reaction | null) => {
-      timersRef.current.push(window.setTimeout(() => setInternalReaction(next), ms));
-    };
+    const next = REACTIONS[cycleRef.current % REACTIONS.length];
+    cycleRef.current += 1;
 
-    const now = Date.now();
-    const boops = boopsRef.current;
-    const isRapid = now - boops.at < DIZZY_WINDOW;
-    boops.count = isRapid ? boops.count + 1 : 1;
-    boops.at = now;
+    setReaction(next);
+    timersRef.current.push(window.setTimeout(() => setReaction(null), REACTION_DWELL_MS));
 
-    const isDizzyTriggered = boops.count >= DIZZY_AFTER;
-
-    if (isDizzyTriggered) {
-      boops.count = 0;
-      setInternalReaction('dizzy');
-      later(DIZZY_END, null);
-      onBoop?.(DIZZY_AFTER, true, 'dizzy');
-    } else {
-      // Cycle through all reaction expressions:
-      // Index 0: blink, 1: heart, 2: sparkle, 3: surprised, 4: wink, 5: bashful, 6: sleepy, 7: dizzy, 8: delighted
-      const nextReaction = REACTIONS[boops.cycleIdx % REACTIONS.length];
-      boops.cycleIdx++;
-
-      setInternalReaction('blink');
-      later(BOOP_PAYOFF, nextReaction);
-      later(BOOP_END, null);
-      onBoop?.(boops.count, false, nextReaction);
-    }
-
-    // Squash & Stretch Animation
     if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       squashRef.current?.animate(SQUASH_KEYFRAMES, {
         duration: SQUASH_MS,
         easing: 'linear',
       });
     }
-  }, [onBoop]);
 
-  const styleFilter = getStyleFilter(artStyle, activeDirections);
+    onBoopRef.current?.();
+  }, []);
 
   const layerBase: React.CSSProperties = {
     position: 'absolute',
@@ -321,37 +228,33 @@ export function EnhancedMascot({
   };
 
   const dirIndex = DIRECTIONS.indexOf(direction);
-  const reactIndex = REACTIONS.indexOf(activeReaction ?? 'blink');
+  const reactIndex = REACTIONS.indexOf(reaction ?? 'blink');
 
-  return (
-    <button
-      ref={containerRef}
-      type="button"
-      onClick={handleBoop}
-      aria-label={`Boop ${label}`}
-      className={`enhanced-mascot-btn ${className}`}
+  // Without an onBoop handler the mascot is decorative, so it renders as a
+  // plain element rather than a focusable button that does nothing.
+  const isInteractive = Boolean(onBoop);
+
+  const shellProps: React.CSSProperties = {
+    position: 'relative',
+    display: 'block',
+    flexShrink: 0,
+    width: size,
+    height: size,
+    padding: 0,
+    border: 0,
+    background: 'transparent',
+    appearance: 'none',
+    cursor: isInteractive ? 'pointer' : 'default',
+    userSelect: 'none',
+    outline: 'none',
+    opacity: ready ? 1 : 0.5,
+    transition: 'opacity 0.2s ease',
+  };
+
+  const mascot = (
+    <span
+      ref={squashRef}
       style={{
-        position: 'relative',
-        display: 'block',
-        flexShrink: 0,
-        width: size,
-        height: size,
-        padding: 0,
-        border: 0,
-        background: 'transparent',
-        appearance: 'none',
-        cursor: 'pointer',
-        userSelect: 'none',
-        outline: 'none',
-        opacity: imagesLoaded ? 1 : 0.6,
-        transition: 'opacity 0.2s ease',
-        ...styleFilter,
-      }}
-    >
-      <span
-        ref={squashRef}
-        className={activeReaction === 'dizzy' ? 'mascot-dizzy-wobble' : ''}
-        style={{
           position: 'relative',
           display: 'block',
           width: '100%',
@@ -359,26 +262,49 @@ export function EnhancedMascot({
           transformOrigin: '50% 78%',
         }}
       >
-        {/* Directions Layer */}
         <span
           style={{
             ...layerBase,
             backgroundImage: `url("${activeDirections}")`,
             ...cellPosition(dirIndex >= 0 ? dirIndex : 4),
-            opacity: activeReaction ? 0 : 1,
+            opacity: reaction ? 0 : 1,
           }}
         />
-
-        {/* Reactions Layer */}
         <span
           style={{
             ...layerBase,
             backgroundImage: `url("${activeReactions}")`,
             ...cellPosition(reactIndex >= 0 ? reactIndex : 0),
-            opacity: activeReaction ? 1 : 0,
+            opacity: reaction ? 1 : 0,
           }}
         />
       </span>
+  );
+
+  if (!isInteractive) {
+    return (
+      <span
+        ref={containerRef as React.RefObject<HTMLSpanElement>}
+        role="img"
+        aria-label={`${label} mascot`}
+        className={`enhanced-mascot-btn ${className}`}
+        style={shellProps}
+      >
+        {mascot}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      ref={containerRef as React.RefObject<HTMLButtonElement>}
+      type="button"
+      onClick={handleBoop}
+      aria-label={`Tap ${label}`}
+      className={`enhanced-mascot-btn ${className}`}
+      style={shellProps}
+    >
+      {mascot}
     </button>
   );
 }

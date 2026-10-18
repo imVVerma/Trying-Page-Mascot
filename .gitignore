@@ -25,3 +25,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Experiment / evaluation scratch space (kept locally, never committed)
+# These contain generated sticker packs and model probe scripts.
+AEvals/
+scratch/
+scratch_*
+custom__dsc_*
