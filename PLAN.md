@@ -13,6 +13,7 @@
 | **1e** | Torso lock | **Done** — torso pixel-identical |
 | **1f** | Tap highlight + touch gaze | **Done** |
 | **1g** | Down-row head clipping | **Partial** — see below |
+| **1h** | No shadow, softer turns, touch zones | **Done** — 20/20 checks |
 | **1** | Generation pipeline | Prompts validated; live run pending |
 | **2** | Cursor feel | Done via 1e/1f |
 | **6** | Cleanup + README | Not started |
@@ -307,8 +308,9 @@ sheet so all nine share **one** torso:
   is hidden rather than seamed.
 - The reference torso comes from the median intact cell, never a fragmented one.
 
-A faint bottom-anchored copy of the neutral cell also sits under the sprite in
-`EnhancedMascot` as a runtime anchor for the shoulders.
+A runtime copy of the neutral cell used to sit under the sprite as a second
+anchor; that layer was removed in Phase 1h — the lock is baked into the sheet at
+slicing time, so the runtime duplicate only read as a ghost under the mascot.
 
 ### 4. Down-direction defects
 Root cause was **not** slicing — it was the model. Measured on real output, the
@@ -328,6 +330,80 @@ the torso lock replaces the broken torsos outright.
 | `spreadH` (height) | 0.222 | **0.000** |
 | Bottom-row torso span | 0.88–0.91 | **0.70–0.78** |
 | Hairline cropped on down-gaze | yes | no |
+
+`tsc` clean · 0 lint errors · build passes. No credits used.
+
+---
+
+## Phase 1h — shadow removal, softer turns, touch gesture zones
+
+### 1. Bottom shadow / reflection removed
+- `.stage-mascot` no longer carries `filter: drop-shadow(0 14px 26px …)` — the
+  offset shadow that read as a smudge directly beneath the sprite.
+- The runtime torso underlay in `EnhancedMascot` (a 16%-opacity copy of cell 4,
+  masked to the bottom 62–88% of the box) is gone too. The torso lock is baked
+  into the sheet by `lockTorsoAcrossSheet()` — measured at 1/9 unique hashes —
+  so the runtime duplicate was redundant as well as visible.
+- The mascot now renders **3** layers: two direction layers + the reaction layer.
+
+### 2. Softer directional turns and a deferred settle
+Two stacked direction layers replace the single one, so a change in gaze is a
+crossfade instead of an instant `backgroundPosition` jump:
+
+- The incoming layer carries the new pose; the outgoing layer keeps the pose it
+  was showing and dissolves, so nothing pops mid-turn.
+- `DIRECTION_CROSSFADE_MS = 340` on `cubic-bezier(0.33, 0, 0.2, 1)` — a
+  deliberately slow, soft beat.
+- The return to centre is now **deferred** by `RETURN_TO_CENTER_MS = 420`
+  (`scheduleCentreReturn()`), cancelled by any new input. Previously
+  `setDirection('center')` ran synchronously on pointer/touch release, which is
+  exactly the "snaps back too abruptly" behaviour.
+- The reaction layer keeps a quicker 220ms fade so an expression still reads
+  inside its 900ms dwell.
+- The idle sweep now restarts after a touch ends (`endTouch` → `startIdle`),
+  which it previously did not.
+
+> Note: there are no literal corner-navigation buttons in this app — the four
+> corner gestures are the down-left/down-right/up-left/up-right gaze sectors,
+> reached by tapping or dragging toward a corner. The soften-and-hold applies to
+> every direction change, corners included.
+
+### 3. Touch gaze capture zones
+- **Edge gutter** (`EDGE_GUTTER_PX = 28`): a touch starting within 28px of the
+  left or right viewport edge is ignored entirely — never steered, never
+  `preventDefault`ed — so the OS keeps swipe-to-go-back and screen-edge
+  gestures.
+- **Gesture intent** (`SWIPE_INTENT_PX = 12`): the first 12px classify the drag.
+  Mostly horizontal → gaze, and a **non-passive** `touchmove` guard suppresses
+  the default action so the page cannot scroll out from under the mascot.
+  Mostly vertical → hands off to the browser immediately and stops steering.
+- **Tighter touch dead zone**: `max(26px, 0.18 × sprite)` versus the desktop
+  `max(48px, 0.42 × sprite)`. The desktop ring was sized for a cursor and
+  swallowed most of a phone-sized mascot, so dragging across the middle of the
+  screen did nothing until it was already far off centre.
+
+### Verified
+Browser harness, 20 assertions, all green:
+
+| Check | Result |
+|---|---|
+| `filter` on `.stage-mascot` | `none` |
+| sprite layers | `3` (underlay removed) |
+| touchstart in the middle band steers | faces `right` |
+| gaze drag suppresses native scroll | `defaultPrevented=true` |
+| pose holds after finger lifts | still `right` at 150ms |
+| settled back to centre | `center` at ~800ms |
+| edge-started swipe | no steer, `defaultPrevented=false` |
+| vertical drag | `defaultPrevented=false` (page scrolls) |
+| corner drag | faces `down-left`, holds 180ms, then centres |
+| crossfade config | `opacity 0.34s cubic-bezier(0.33, 0, 0.2, 1)` |
+
+Harness-only caveats: the automation browser reports `document.visibilityState
+= 'hidden'`, so its animation timeline is frozen (`document.timeline.currentTime
+= 0`) — the crossfade is verified by its target values and transition
+configuration, not by sampling frames. The harness also has to block real
+`pointermove` events, because a mouse parked over the page re-aims the mascot
+between synthetic touches.
 
 `tsc` clean · 0 lint errors · build passes. No credits used.
 

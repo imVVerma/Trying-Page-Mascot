@@ -52,16 +52,46 @@ const SQUASH_MS = 420;
 const IDLE_DWELL_MS = 1600;
 
 /**
- * Torso lock.
+ * Direction change feel.
  *
- * Gaze sheets frame each pose slightly differently, so the shoulders can shift a
- * little between cells — which reads as the whole body twitching. A faint,
- * bottom-anchored copy of a fixed reference cell is composited underneath to
- * anchor the shoulders, so only the head appears to move.
+ * A direction swap used to be an instant backgroundPosition jump and the gaze
+ * snapped straight back to centre the moment a finger lifted, which read as a
+ * hard twitch. Direction layers now crossfade over DIRECTION_CROSSFADE_MS on a
+ * soft ease, and the return to centre is deferred by RETURN_TO_CENTER_MS so the
+ * mascot lingers on whatever corner it was pointed at before settling.
  */
-const TORSO_ANCHOR_CELL = 4; // the neutral, forward-facing cell
-const TORSO_FADE_START = 62;
-const TORSO_FADE_END = 88;
+const DIRECTION_CROSSFADE_MS = 340;
+const DIRECTION_EASING = 'cubic-bezier(0.33, 0, 0.2, 1)';
+const RETURN_TO_CENTER_MS = 420;
+
+/**
+ * Touch capture zone.
+ *
+ * EDGE_GUTTER_PX: touches that begin this close to the left or right edge of
+ * the viewport are never treated as gaze input — that is where the OS reserves
+ * swipe-to-go-back and screen-edge gestures, and stealing them is what made
+ * edge swipes feel hijacked.
+ *
+ * SWIPE_INTENT_PX: the first few pixels of a drag are ambiguous, so the
+ * gesture is classified as gaze (mostly horizontal) or scroll (mostly
+ * vertical) once it clears this distance. Gaze drags then have their default
+ * action suppressed so the page does not scroll out from under them, while
+ * vertical drags scroll normally.
+ */
+const EDGE_GUTTER_PX = 28;
+const SWIPE_INTENT_PX = 12;
+
+/**
+ * Dead-zone for touch. The desktop dead zone (0.42 of the sprite, min 48px) is
+ * sized for a hovering cursor and swallowed most of a phone-sized mascot, so a
+ * drag across the middle of the screen did nothing until it was already far
+ * off centre. Touch uses a much tighter ring so the central screen area
+ * responds immediately, while still leaving the mascot a centre pose to return
+ * to.
+ */
+const TOUCH_DEAD_ZONE_RATIO = 0.18;
+const MIN_TOUCH_DEAD_ZONE = 26;
+
 
 const SQUASH_KEYFRAMES: Keyframe[] = [
   { transform: 'scale(1, 1)', easing: 'ease-in' },
@@ -114,6 +144,17 @@ export function EnhancedMascot({
   });
 
   const [direction, setDirection] = useState<Direction>('center');
+  /**
+   * Two stacked direction layers so a change can crossfade instead of popping.
+   * `side` is the layer currently on top; the other one holds the outgoing pose
+   * while it fades out, which is what keeps a turn — or the return to centre —
+   * from snapping.
+   */
+  const [dirLayers, setDirLayers] = useState<{ front: Direction; back: Direction; side: 0 | 1 }>({
+    front: 'center',
+    back: 'center',
+    side: 0,
+  });
   const [reaction, setReaction] = useState<Reaction | null>(null);
   const [ready, setReady] = useState(false);
   const [activeDirections, setActiveDirections] = useState(directions);
@@ -121,6 +162,15 @@ export function EnhancedMascot({
 
   useEffect(() => setActiveDirections(directions), [directions]);
   useEffect(() => setActiveReactions(reactions), [reactions]);
+
+  // Swap the crossfade layers whenever the gaze direction actually changes.
+  useEffect(() => {
+    setDirLayers((prev) =>
+      prev.front === direction
+        ? prev
+        : { front: direction, back: prev.front, side: prev.side === 0 ? 1 : 0 }
+    );
+  }, [direction]);
 
   // Preload so the mascot never flashes while swapping sprites.
   useEffect(() => {
@@ -169,6 +219,48 @@ export function EnhancedMascot({
     let sector = -1;
     let pointer: { x: number; y: number } | null = null;
     let touching = false;
+    /**
+     * What the current touch is doing:
+     *  - 'undecided'  not yet moved far enough to classify
+     *  - 'gaze'       mostly-horizontal drag in the safe middle band, steers
+     *  - 'scroll'     edge swipe or vertical drag, left entirely to the browser/OS
+     */
+    let gesture: 'undecided' | 'gaze' | 'scroll' = 'scroll';
+    let startX = 0;
+    let startY = 0;
+    let centerTimer = 0;
+    let idleTimer = 0;
+    let kickoff = 0;
+
+    const cancelCenterReturn = () => {
+      if (centerTimer) {
+        window.clearTimeout(centerTimer);
+        centerTimer = 0;
+      }
+    };
+
+    const goCentre = () => {
+      sector = -1;
+      setDirection('center');
+    };
+
+    /**
+     * Returning to centre is deferred rather than immediate. Snapping back the
+     * instant input stopped is what made a corner tap feel like it sprang back;
+     * holding the pose briefly and then crossfading (see DIRECTION_CROSSFADE_MS)
+     * gives the settle instead.
+     */
+    const scheduleCentreReturn = () => {
+      cancelCenterReturn();
+      centerTimer = window.setTimeout(() => {
+        centerTimer = 0;
+        goCentre();
+      }, RETURN_TO_CENTER_MS);
+    };
+
+    /** Touches inside the OS gesture gutters are never ours to interpret. */
+    const inEdgeGutter = (x: number) =>
+      x <= EDGE_GUTTER_PX || x >= window.innerWidth - EDGE_GUTTER_PX;
 
     const aim = () => {
       const node = containerRef.current;
@@ -180,8 +272,11 @@ export function EnhancedMascot({
 
       const dist = Math.hypot(dx, dy);
       const rawAngle = Math.atan2(dy, dx);
-      // Dead-zone scales with the mascot so the feel is the same at any size.
-      const deadZone = Math.max(MIN_DEAD_ZONE, sizeRef.current * DEAD_ZONE_RATIO);
+      // Dead-zone scales with the mascot so the feel is the same at any size,
+      // and is much tighter under touch so the middle of the screen responds.
+      const deadZone = touching
+        ? Math.max(MIN_TOUCH_DEAD_ZONE, sizeRef.current * TOUCH_DEAD_ZONE_RATIO)
+        : Math.max(MIN_DEAD_ZONE, sizeRef.current * DEAD_ZONE_RATIO);
 
       if (dist < deadZone) {
         sector = -1;
@@ -198,76 +293,115 @@ export function EnhancedMascot({
       setDirection(CLOCKWISE[sector]);
     };
 
+    const beginTouch = (x: number, y: number) => {
+      // Swipes that start against the screen edge belong to the OS — the
+      // swipe-to-go-back gesture — so they are ignored outright rather than
+      // partially captured.
+      if (inEdgeGutter(x)) {
+        gesture = 'scroll';
+        return;
+      }
+
+      touching = true;
+      cancelCenterReturn();
+      stopIdle();
+      startX = x;
+      startY = y;
+      gesture = 'undecided';
+      pointer = { x, y };
+      aim();
+    };
+
+    const continueTouch = (x: number, y: number) => {
+      if (!touching || gesture === 'scroll') return;
+
+      if (gesture === 'undecided') {
+        const dx = x - startX;
+        const dy = y - startY;
+        if (Math.hypot(dx, dy) < SWIPE_INTENT_PX) return;
+        // Mostly-horizontal drives the gaze; mostly-vertical is a page scroll
+        // and we hands off immediately so it never feels hijacked.
+        gesture = Math.abs(dx) >= Math.abs(dy) ? 'gaze' : 'scroll';
+        if (gesture === 'scroll') {
+          pointer = null;
+          scheduleCentreReturn();
+          return;
+        }
+      }
+
+      pointer = { x, y };
+      aim();
+    };
+
+    const endTouch = () => {
+      if (!touching) return;
+      touching = false;
+      gesture = 'scroll';
+      pointer = null;
+      scheduleCentreReturn();
+      // Resume the idle sweep so a phone mascot goes back to drifting on its own.
+      kickoff = window.setTimeout(startIdle, IDLE_DWELL_MS);
+    };
+
     // Mouse movement steers directly.
     const onPointerMove = (event: PointerEvent) => {
       if (event.pointerType === 'touch') return;
+      cancelCenterReturn();
       pointer = { x: event.clientX, y: event.clientY };
       aim();
     };
 
-    // Touch: dragging steers, lifting releases back to centre.
-    const onTouchStart = (event: PointerEvent) => {
+    // Pointer Events cover touch on most modern browsers.
+    const onPointerDown = (event: PointerEvent) => {
       if (event.pointerType !== 'touch') return;
-      touching = true;
-      stopIdle();
-      pointer = { x: event.clientX, y: event.clientY };
-      aim();
+      beginTouch(event.clientX, event.clientY);
     };
 
-    const onTouchMove = (event: PointerEvent) => {
-      if (event.pointerType !== 'touch' || !touching) return;
-      pointer = { x: event.clientX, y: event.clientY };
-      aim();
-    };
-
-    const onTouchEnd = () => {
-      if (!touching) return;
-      touching = false;
-      pointer = null;
-      sector = -1;
-      setDirection('center');
+    const onPointerTouchMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return;
+      continueTouch(event.clientX, event.clientY);
     };
 
     // Legacy Touch Events, for browsers that fire touch rather than pointer
-    // events (older iOS Safari). Coordinates come from touches[0] and are mapped
-    // relative to the mascot, exactly like a mouse.
-    const readTouch = (event: TouchEvent) => {
+    // events (older iOS Safari). Coordinates come from touches[0].
+    const readTouches = (event: TouchEvent, phase: 'begin' | 'continue') => {
       const t = event.touches?.[0] ?? event.changedTouches?.[0];
       if (!t) return;
-      pointer = { x: t.clientX, y: t.clientY };
-      aim();
+      if (phase === 'begin') beginTouch(t.clientX, t.clientY);
+      else continueTouch(t.clientX, t.clientY);
     };
 
-    const onTouchEventStart = (event: TouchEvent) => {
-      touching = true;
-      stopIdle();
-      readTouch(event);
-    };
-
-    const onTouchEventMove = (event: TouchEvent) => {
+    /**
+     * Suppresses the default scroll only once a drag has been recognised as a
+     * gaze drag (or is still undetermined inside the safe middle band). Registered
+     * non-passive — it runs after the classifiers above, which share the
+     * registration order — so a gaze drag cannot scroll the page out from under
+     * the mascot, while edge swipes and vertical scrolls are never blocked.
+     */
+    const onMoveGuard = (event: TouchEvent) => {
       if (!touching) return;
-      readTouch(event);
+      if (gesture === 'gaze' || gesture === 'undecided') event.preventDefault();
     };
 
-    const onTouchEventEnd = () => onTouchEnd();
+    const onTouchStartEvent = (event: TouchEvent) => readTouches(event, 'begin');
+    const onTouchMoveEvent = (event: TouchEvent) => readTouches(event, 'continue');
 
     window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerdown', onTouchStart, { passive: true });
-    window.addEventListener('pointermove', onTouchMove, { passive: true });
-    window.addEventListener('pointerup', onTouchEnd, { passive: true });
-    window.addEventListener('pointercancel', onTouchEnd, { passive: true });
-    window.addEventListener('touchstart', onTouchEventStart, { passive: true });
-    window.addEventListener('touchmove', onTouchEventMove, { passive: true });
-    window.addEventListener('touchend', onTouchEventEnd, { passive: true });
-    window.addEventListener('touchcancel', onTouchEventEnd, { passive: true });
+    window.addEventListener('pointerdown', onPointerDown, { passive: true });
+    window.addEventListener('pointermove', onPointerTouchMove, { passive: true });
+    window.addEventListener('pointerup', endTouch, { passive: true });
+    window.addEventListener('pointercancel', endTouch, { passive: true });
+    window.addEventListener('touchstart', onTouchStartEvent, { passive: true });
+    window.addEventListener('touchmove', onTouchMoveEvent, { passive: true });
+    window.addEventListener('touchmove', onMoveGuard, { passive: false });
+    window.addEventListener('touchend', endTouch, { passive: true });
+    window.addEventListener('touchcancel', endTouch, { passive: true });
     window.addEventListener('scroll', aim, { passive: true });
 
     // On touch devices, sweep the gaze gently while idle so the mascot reads as
     // alive without anyone interacting.
-    let idleTimer = 0;
-    const startIdle = () => {
-      if (canHover || touching) return;
-      stopIdle();
+    function startIdle() {
+      if (canHover || touching || idleTimer) return;
       const step = () => {
         if (touching) return;
         const order: Direction[] = ['left', 'up-left', 'up', 'up-right', 'right', 'down-right', 'down', 'down-left'];
@@ -277,7 +411,7 @@ export function EnhancedMascot({
         idleTimer = window.setTimeout(step, IDLE_DWELL_MS);
       };
       idleTimer = window.setTimeout(step, IDLE_DWELL_MS);
-    };
+    }
 
     function stopIdle() {
       if (idleTimer) {
@@ -287,21 +421,22 @@ export function EnhancedMascot({
     }
 
     // Only sweep when genuinely idle, not while the page is loading.
-    const kickoff = window.setTimeout(startIdle, IDLE_DWELL_MS);
-    void kickoff;
+    kickoff = window.setTimeout(startIdle, IDLE_DWELL_MS);
 
     return () => {
       window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerdown', onTouchStart);
-      window.removeEventListener('pointermove', onTouchMove);
-      window.removeEventListener('pointerup', onTouchEnd);
-      window.removeEventListener('pointercancel', onTouchEnd);
-      window.removeEventListener('touchstart', onTouchEventStart);
-      window.removeEventListener('touchmove', onTouchEventMove);
-      window.removeEventListener('touchend', onTouchEventEnd);
-      window.removeEventListener('touchcancel', onTouchEventEnd);
+      window.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerTouchMove);
+      window.removeEventListener('pointerup', endTouch);
+      window.removeEventListener('pointercancel', endTouch);
+      window.removeEventListener('touchstart', onTouchStartEvent);
+      window.removeEventListener('touchmove', onTouchMoveEvent);
+      window.removeEventListener('touchmove', onMoveGuard);
+      window.removeEventListener('touchend', endTouch);
+      window.removeEventListener('touchcancel', endTouch);
       window.removeEventListener('scroll', aim);
       window.clearTimeout(kickoff);
+      cancelCenterReturn();
       stopIdle();
     };
   }, []);
@@ -339,10 +474,13 @@ export function EnhancedMascot({
     inset: 0,
     backgroundSize: '300% 300%',
     backgroundRepeat: 'no-repeat',
-    transition: 'opacity 0.08s ease-in-out',
+    // Direction changes (and the settle back to centre) dissolve rather than
+    // pop: a soft ease over a deliberately slow beat.
+    transition: `opacity ${DIRECTION_CROSSFADE_MS}ms ${DIRECTION_EASING}`,
   };
 
-  const dirIndex = DIRECTIONS.indexOf(direction);
+  const dirIndexA = DIRECTIONS.indexOf(dirLayers.side === 0 ? dirLayers.front : dirLayers.back);
+  const dirIndexB = DIRECTIONS.indexOf(dirLayers.side === 1 ? dirLayers.front : dirLayers.back);
   const reactIndex = REACTIONS.indexOf(reaction ?? 'blink');
 
   // Without an onBoop handler the mascot is decorative, so it renders as a
@@ -383,12 +521,23 @@ export function EnhancedMascot({
           transformOrigin: '50% 78%',
         }}
       >
+        {/* Two direction layers: the visible one carries the current gaze, the
+            other holds the pose being left behind and dissolves away, so a turn
+            — or the settle back to centre — is a crossfade, not a jump. */}
         <span
           style={{
             ...layerBase,
             backgroundImage: `url("${activeDirections}")`,
-            ...cellPosition(dirIndex >= 0 ? dirIndex : 4),
-            opacity: reaction ? 0 : 1,
+            ...cellPosition(dirIndexA >= 0 ? dirIndexA : 4),
+            opacity: reaction ? 0 : dirLayers.side === 0 ? 1 : 0,
+          }}
+        />
+        <span
+          style={{
+            ...layerBase,
+            backgroundImage: `url("${activeDirections}")`,
+            ...cellPosition(dirIndexB >= 0 ? dirIndexB : 4),
+            opacity: reaction ? 0 : dirLayers.side === 1 ? 1 : 0,
           }}
         />
         <span
@@ -397,20 +546,9 @@ export function EnhancedMascot({
             backgroundImage: `url("${activeReactions}")`,
             ...cellPosition(reactIndex >= 0 ? reactIndex : 0),
             opacity: reaction ? 1 : 0,
-          }}
-        />
-        {/* Torso lock: a steady body behind the moving sprite, faded in wherever
-            the sheet's own body has been cropped away by the gaze framing. */}
-        <span
-          style={{
-            position: 'absolute',
-            inset: 0,
-            backgroundImage: `url("${activeDirections}")`,
-            ...cellPosition(TORSO_ANCHOR_CELL),
-            opacity: reaction ? 0.12 : 0.16,
-            maskImage: `linear-gradient(to bottom, transparent ${TORSO_FADE_START}%, #000 ${TORSO_FADE_END}%)`,
-            WebkitMaskImage: `linear-gradient(to bottom, transparent ${TORSO_FADE_START}%, #000 ${TORSO_FADE_END}%)`,
-            transition: 'opacity 0.12s ease-in-out',
+            // Reactions dwell for a fixed beat, so they dissolve faster than a
+            // gaze turn in order to stay legible within it.
+            transition: 'opacity 220ms ease-in-out',
           }}
         />
       </span>

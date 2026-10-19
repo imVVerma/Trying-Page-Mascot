@@ -107,7 +107,9 @@
 }
 
 .stage-mascot {
-  filter: drop-shadow(0 14px 26px rgba(0, 0, 0, 0.45));
+  /* No drop-shadow / reflection under the sprite: the sticker art carries its
+     own die-cut edge and shading, and a second shadow underneath read as a
+     smudge below the mascot. */
   animation: mascotIdle 4.5s ease-in-out infinite;
 }
 
