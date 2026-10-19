@@ -10,7 +10,7 @@ import {
   type StickerItem,
 } from './utils/stickerSlicer';
 import { buildMascotAssets } from './utils/proceduralSpriteGenerator';
-import { generateMascot, fileToBase64 } from './services/mascotService';
+import { generateMascot, photoForUpload } from './services/mascotService';
 import { saveMascot, loadMostRecent, type StoredMascot } from './utils/mascotStorage';
 import './App.css';
 
@@ -213,7 +213,7 @@ export default function App() {
 
     try {
       setGenerationStatus('Drawing your mascot…');
-      const photo = await fileToBase64(uploadedFile);
+      const photo = await photoForUpload(uploadedFile);
       const assets = await generateMascot(photo);
 
       setGenerationStatus('Building your sticker pack…');

@@ -448,6 +448,108 @@ the checks in the table above.
 
 ---
 
+## Phase 1i - first live end-to-end run (the failure was ours to report)
+
+The first real run through the app failed with a single line:
+
+> The image model did not return a mascot image.
+
+The photo report the user saw alongside it is produced locally by
+`src/utils/photoValidator.ts` and never touches the network — so the upload
+passed and the failure was upstream, at stage 1 (the identity-anchor bust).
+
+### The message was the bug
+
+`callImageModel` collapsed every failure into a bare `null`:
+
+| What happened | What the server did |
+|---|---|
+| upstream returned 4xx/5xx | `return null` |
+| 200 OK, body holds no image | `extractImage` → `null` |
+| 200 OK, text-only reply (refusal / gateway message) | `extractImage` → `null` |
+| fetch threw (oversized body, dropped connection) | propagated to a generic 500 |
+
+All four surfaced as the same sentence. The real reason existed only in
+`console.error`, in the `vite` terminal, where nobody looks during a run.
+
+`callImageModel` now returns `{ image, detail }` and the caller passes `detail`
+through:
+
+| Failure | Message the user now sees |
+|---|---|
+| non-2xx | `The image model returned HTTP 502: {"error":{…}}` |
+| 200, no image | `The image model replied 200 OK, but no image was present in the response (6.4 MB request).` |
+| 200 with text | `The image model replied with text instead of an image: "<what it said>"` |
+| network throw | `Could not reach the image model (<msg>). The photo was sent as N MB of base64.` |
+
+The upstream body is cut to 220 chars and the API key is split out of it before
+the string can reach the browser — a gateway that echoes the request back must
+not leak the credential into a rendered message. Stages 2 and 3 log their
+reasons too instead of silently returning `null`.
+
+### The photo went up untouched
+
+`fileToBase64(uploadedFile)` sent the raw file: a 4.8 MB JPEG became ~6.4 MB of
+base64 in one JSON body, and gateways commonly reject that outright.
+
+`photoForUpload()` decodes with EXIF rotation applied, downscales anything over
+**1280px** on its longest side, and re-encodes as JPEG q0.92. It falls back to
+the untouched file on anything unexpected, so an exotic format still uploads.
+Verified in-browser, no credits:
+
+| Input | Output |
+|---|---|
+| 4032×3024 JPEG, 10.88 MB | 1280×960 JPEG, 0.67 MB |
+| 2000×1500 PNG, 2.32 MB | 1280×960 JPEG, 1.03 MB |
+| 800×600 JPEG, 0.44 MB | unchanged (already under the limit) |
+| 1600×1067 JPEG (1.50 ratio) | 1280×854 JPEG, 0.82 MB |
+
+Live run logged `Upload photo downscaled 4080×3072 → 1280×964 (0.7 MB → 0.27 MB)`.
+
+### What the run actually revealed
+
+The new message named the cause immediately:
+
+```json
+{"error":{"message":"The upstream provider is temporarily unavailable. \
+Please retry in a few moments; contact support if this persists.",
+"type":"upstream_error","param":null,"code":502}}
+```
+
+Not size, not a refusal — a **transient upstream outage**. The old code hid it
+behind a sentence that implied the model had produced something unusable.
+
+### Transient faults are retried now
+
+A 502 from the gateway means the provider failed and the request was fine, so
+making the user start over is pure waste. `callImageModel` retries up to 3
+attempts with 1.5s / 3s backoff on `[408, 425, 429, 500, 502, 503, 504]` and on
+network throws. A 400 or 401 is **not** retried — it fails identically forever.
+A 2xx is never retried, since the provider already answered.
+
+Observed in the live run, all three attempts with the reason logged each time:
+
+```
+Image model error (502) on attempt 1: {"error":{"message":"The upstream provider…"}}
+Image call failed (…) — retrying in 1500ms (attempt 2/3).
+Image model error (502) on attempt 2: …
+Image call failed (…) — retrying in 3000ms (attempt 3/3).
+Image model error (502) on attempt 3: …
+```
+
+### Verified
+
+- `photoForUpload`: 4/4 cases correct (table above).
+- Error surfacing: the 502 body reached the browser verbatim, redaction in place.
+- Retry: 3 attempts observed, backoff logged, final message accurate.
+- `tsc` clean · 0 lint errors · build passes.
+
+**Credits spent: 0.** A 502 means the provider never generated, so nothing was
+billed on any of the attempts. The end-to-end pipeline still has not completed —
+it is blocked on the upstream outage, not on our code.
+
+---
+
 ## Phase 1 — generation pipeline (prompts validated)
 
 Built the 3-stage server pipeline and validated every prompt against a real

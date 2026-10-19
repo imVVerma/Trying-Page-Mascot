@@ -19,6 +19,72 @@ export function fileToBase64(file: File | Blob): Promise<string> {
   });
 }
 
+/**
+ * Longest edge we send to the model, in pixels. A phone photo is often 12MP,
+ * and base64 of that runs to tens of megabytes — several gateways reject that
+ * outright, and even when they accept it the upload dominates the request time.
+ * The model resizes its input anyway, and 1280px holds every facial detail a
+ * chibi needs.
+ */
+const MAX_UPLOAD_EDGE = 1280;
+
+/** JPEG quality for the downscaled upload. */
+const UPLOAD_QUALITY = 0.92;
+
+/**
+ * Prepares a user photo for upload: decodes it honouring EXIF orientation,
+ * downscales anything over MAX_UPLOAD_EDGE on its longest side, and returns a
+ * JPEG data URI. Anything unexpected falls back to the untouched file, so an
+ * exotic format still uploads rather than blocking the user.
+ */
+export async function photoForUpload(file: File | Blob): Promise<string> {
+  try {
+    let bitmap: ImageBitmap;
+    try {
+      // 'from-image' applies the camera's rotation; older engines reject the
+      // option, and an unrotated upload is better than none.
+      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch {
+      bitmap = await createImageBitmap(file);
+    }
+
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    const scale = Math.min(1, MAX_UPLOAD_EDGE / Math.max(srcW, srcH));
+    if (scale === 1) {
+      bitmap.close();
+      return fileToBase64(file);
+    }
+
+    const targetW = Math.max(1, Math.round(srcW * scale));
+    const targetH = Math.max(1, Math.round(srcH * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close();
+      return fileToBase64(file);
+    }
+
+    ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+    bitmap.close();
+
+    const dataUrl = canvas.toDataURL('image/jpeg', UPLOAD_QUALITY);
+    // A failed encode yields 'data:,' — treat it as unusable.
+    if (!dataUrl || dataUrl.startsWith('data:,')) return fileToBase64(file);
+
+    console.info(
+      `Upload photo downscaled ${srcW}×${srcH} → ${targetW}×${targetH} ` +
+        `(${(file.size / 1024 / 1024).toFixed(1)} MB → ${(dataUrl.length / 1024 / 1024).toFixed(2)} MB)`
+    );
+    return dataUrl;
+  } catch (err) {
+    console.warn('Could not downscale photo, uploading the original:', err);
+    return fileToBase64(file);
+  }
+}
+
 export interface GeneratedAssets {
   /** Canonical chibi bust — used as the character preview. */
   bust: string;

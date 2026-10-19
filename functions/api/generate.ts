@@ -220,10 +220,14 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
       callImageModel(apiKey, model, prompt, inputImage);
 
     // ── Stage 1: identity anchor. Without this the later sheets drift.
-    const bust = await generate(BUST_PROMPT, photo);
-    if (!bust) {
-      return json({ error: 'The image model did not return a mascot image.' }, 502);
+    const bustCall = await generate(BUST_PROMPT, photo);
+    if (!bustCall.image) {
+      return json(
+        { error: bustCall.detail || 'The image model did not return a mascot image.' },
+        502
+      );
     }
+    const bust = bustCall.image;
 
     // ── Optional: a one-sentence subject description to reinforce identity.
     let traits = '';
@@ -264,22 +268,27 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
 
     // ── Stages 2 and 3: the two sprite sheets, both referencing the bust.
     // Run them together; each is independent and either may fail.
-    const [directions, reactions] = await Promise.all([
+    const [dirCall, reactCall] = await Promise.all([
       generate(DIRECTIONS_PROMPT, bust).catch((err) => {
-        console.warn('Directions sheet failed:', err);
-        return null;
+        console.warn('Directions sheet threw:', err);
+        return { image: null, detail: String(err) };
       }),
       generate(REACTIONS_PROMPT, bust).catch((err) => {
-        console.warn('Reactions sheet failed:', err);
-        return null;
+        console.warn('Reactions sheet threw:', err);
+        return { image: null, detail: String(err) };
       }),
     ]);
+
+    // A sheet that came back empty is not fatal — the client rebuilds it
+    // procedurally — but the reason belongs in the log, not silently dropped.
+    if (!dirCall.image) console.warn('Directions sheet failed:', dirCall.detail);
+    if (!reactCall.image) console.warn('Reactions sheet failed:', reactCall.detail);
 
     return json({
       success: true,
       bust,
-      directions,
-      reactions,
+      directions: dirCall.image,
+      reactions: reactCall.image,
       traits: traits || undefined,
       model,
     });
@@ -289,41 +298,135 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
   }
 };
 
-/** One image-to-image call. Returns a data URI, or null if the model gave nothing usable. */
+/** Result of one image call. `detail` is empty on success and safe to show a user. */
+interface ImageCallResult {
+  image: string | null;
+  detail: string;
+}
+
+/**
+ * Upstream statuses worth retrying on our side: the provider failed, the
+ * request was fine. A 502 from the gateway is the common one in practice, and
+ * making the user start over for it wastes a generation and their credits.
+ */
+const RETRY_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+/** Backoff between attempts; attempt N waits (N-1) × this. */
+const RETRY_BASE_MS = 1500;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Shortens upstream text for an error message and strips the credential out of
+ * it, so a gateway that echoes the request back cannot leak the key into a
+ * message that gets rendered in the browser.
+ */
+function snippet(text: string, apiKey: string, max = 220): string {
+  const safe = apiKey ? text.split(apiKey).join('[redacted]') : text;
+  const oneLine = safe.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/**
+ * One image-to-image call, retrying transient provider faults.
+ *
+ * Failures carry a reason rather than a bare null: a rejected request, a
+ * 200 whose body holds no image, or a text-only reply (a refusal, or a gateway
+ * message) all used to end up as the same generic "did not return a mascot
+ * image", which is useless when debugging a real generation.
+ */
 async function callImageModel(
   apiKey: string,
   model: string,
   prompt: string,
   inputImage: string
-): Promise<string | null> {
-  const res = await fetch(`${UPSTREAM_BASE}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: inputImage } },
-          ],
-        },
-      ],
-    }),
+): Promise<ImageCallResult> {
+  const payloadMb = (inputImage.length / 1024 / 1024).toFixed(1);
+  const body = JSON.stringify({
+    model,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: inputImage } },
+        ],
+      },
+    ],
   });
 
-  if (!res.ok) {
-    const text = await res.text();
-    console.error(`Image model error (${res.status}):`, text.slice(0, 500));
-    return null;
+  let detail = 'The image model did not return a mascot image.';
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (attempt > 1) {
+      const wait = RETRY_BASE_MS * (attempt - 1);
+      console.warn(`Image call failed (${detail}) — retrying in ${wait}ms (attempt ${attempt}/${MAX_ATTEMPTS}).`);
+      await sleep(wait);
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(`${UPSTREAM_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body,
+      });
+    } catch (netErr: any) {
+      // Typically an oversized body or a dropped connection mid-upload.
+      console.error(`Image model request failed (attempt ${attempt}):`, netErr);
+      detail =
+        `Could not reach the image model (${netErr?.message || 'network error'}). ` +
+        `The photo was sent as ${payloadMb} MB of base64.`;
+      continue;
+    }
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`Image model error (${res.status}) on attempt ${attempt}:`, text.slice(0, 500));
+      detail = `The image model returned HTTP ${res.status}: ${snippet(text, apiKey)}`;
+      // Only transient faults are worth another attempt; a 400 or 401 will
+      // fail identically forever.
+      if (RETRY_STATUSES.has(res.status)) continue;
+      return { image: null, detail };
+    }
+
+    // The provider answered 2xx, so nothing is retryable past this point.
+    let data: any;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      console.error('Image model returned a non-JSON body:', parseErr);
+      return { image: null, detail: 'The image model returned a response that was not JSON.' };
+    }
+
+    const image = extractImage(data);
+    if (image) return { image, detail: '' };
+
+    // A 200 with no image is almost always a text reply. Show what the model
+    // actually said instead of leaving it in the server log.
+    const message = data?.choices?.[0]?.message;
+    let said = typeof message?.content === 'string' ? message.content : '';
+    if (Array.isArray(message?.content)) {
+      said = message.content
+        .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+        .join(' ')
+        .trim();
+    }
+    console.error('Image model returned no image. Body:', JSON.stringify(data).slice(0, 800));
+
+    return {
+      image: null,
+      detail: said.trim()
+        ? `The image model replied with text instead of an image: "${snippet(said, apiKey)}"`
+        : `The image model replied 200 OK, but no image was present in the response ` +
+          `(${payloadMb} MB request).`,
+    };
   }
 
-  const data: any = await res.json();
-  return extractImage(data);
+  return { image: null, detail };
 }
 
 /**
