@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gaze harness — EnhancedMascot</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #12121a;
+        color: #e8e8ef;
+        font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; opacity: .55; margin: 22px 0 6px; }
+      .lede { margin: 0 0 16px; opacity: .72; max-width: 74ch; }
+      code { background: #1e1e2a; padding: 1px 5px; border-radius: 4px; }
+      #stage-wrap {
+        display: grid; place-items: center;
+        height: 420px; margin-bottom: 8px;
+        border: 1px dashed #33334a; border-radius: 12px;
+      }
+      #summary { font-size: 15px; font-weight: 700; margin: 14px 0 8px; }
+      #summary.pass { color: #4ade80; }
+      #summary.fail { color: #f87171; }
+      table { border-collapse: collapse; width: 100%; }
+      td { padding: 4px 8px; border-bottom: 1px solid #23232f; vertical-align: top; }
+      td.mark { width: 52px; font-weight: 700; }
+      td.mark.pass { color: #4ade80; }
+      td.mark.fail { color: #f87171; }
+      td.detail { opacity: .62; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+      tr.fail td { background: rgba(248, 113, 113, .07); }
+    </style>
+  </head>
+  <body>
+    <h1>Gaze harness — <code>EnhancedMascot</code></h1>
+    <p class="lede">
+      Drives the component with synthetic touch and pointer events and asserts the
+      behaviour documented in <code>PLAN.md</code> Phase 1h. Start <code>npx vite</code>
+      and open <code>/gaze-harness.html</code>. The page is never built into
+      <code>dist/</code> — Vite's only entry is <code>index.html</code>.
+      Results are also on <code>window.__gazeHarness</code> for automation.
+    </p>
+    <div id="stage-wrap"><div id="mount"></div></div>
+    <div id="summary">running…</div>
+    <div id="results"></div>
+
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { EnhancedMascot } from '/src/components/EnhancedMascot.tsx';
+      import { DIRECTIONS } from '/src/utils/mascotPoses.ts';
+      import '/src/App.css';
+
+      // ── Harness plumbing ────────────────────────────────────────────────────
+
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const results = [];
+      let passed = 0;
+
+      /** `eq` returns true, or a message describing the mismatch. */
+      const eq = (actual, expected, label) =>
+        actual === expected ? true : `${label}: expected ${expected}, got ${actual}`;
+
+      async function check(name, fn) {
+        try {
+          const outcome = await fn();
+          const ok = outcome === true;
+          results.push({ name, pass: ok, detail: ok ? '' : String(outcome) });
+          if (ok) passed++;
+        } catch (err) {
+          results.push({ name, pass: false, detail: `threw: ${err && err.message}` });
+        }
+        render();
+      }
+
+      function render() {
+        const summary = document.getElementById('summary');
+        const done = results.length;
+        summary.textContent = `${passed} / ${done} passing`;
+        summary.className = done === 27 && passed === 27 ? 'pass' : 'fail';
+        document.getElementById('results').innerHTML =
+          '<table>' +
+          results
+            .map(
+              (r) =>
+                `<tr class="${r.pass ? '' : 'fail'}">` +
+                `<td class="mark ${r.pass ? 'pass' : 'fail'}">${r.pass ? 'PASS' : 'FAIL'}</td>` +
+                `<td>${r.name}</td>` +
+                `<td class="detail">${r.detail}</td>` +
+                '</tr>'
+            )
+            .join('') +
+          '</table>';
+        window.__gazeHarness = { results, passed, total: results.length, done: done === 27 };
+      }
+
+      /**
+       * A real cursor parked over the page would keep re-aiming the mascot between
+       * synthetic touches and make the whole run meaningless. Block genuine
+       * pointer/mouse input at the capture phase — registered before the component
+       * mounts, so it runs first and `stopImmediatePropagation` holds — while
+       * letting the harness's own marked events through.
+       */
+      function blockRealMouse() {
+        for (const type of ['pointermove', 'pointerdown', 'pointerup', 'mousedown', 'mousemove', 'click']) {
+          window.addEventListener(
+            type,
+            (e) => {
+              if (!e.__synthetic) e.stopImmediatePropagation();
+            },
+            { capture: true }
+          );
+        }
+      }
+
+      /**
+       * The idle sweep only runs on touch-only devices; forcing the hover query to
+       * match keeps poses deterministic under automation, where the sweep would
+       * otherwise change direction every 1.6s and race the assertions.
+       */
+      function pinHoverCapability() {
+        const real = window.matchMedia.bind(window);
+        window.matchMedia = (query) =>
+          /hover:\s*hover/.test(query)
+            ? { matches: true, media: query, addEventListener() {}, removeEventListener() {} }
+            : real(query);
+      }
+
+      const added = new Map();
+      const removedCount = new Map();
+      let counting = false;
+      function countListeners() {
+        const key = (target, type) => `${target === window ? 'window' : 'other'}:${type}`;
+        const origAdd = EventTarget.prototype.addEventListener;
+        const origRemove = EventTarget.prototype.removeEventListener;
+        EventTarget.prototype.addEventListener = function (type, fn, opts) {
+          if (counting) added.set(key(this, type), (added.get(key(this, type)) || 0) + 1);
+          return origAdd.call(this, type, fn, opts);
+        };
+        EventTarget.prototype.removeEventListener = function (type, fn, opts) {
+          if (counting) {
+            const k = key(this, type);
+            removedCount.set(k, (removedCount.get(k) || 0) + 1);
+          }
+          return origRemove.call(this, type, fn, opts);
+        };
+      }
+
+      // ── Reading the mascot's state ──────────────────────────────────────────
+
+      const mascotEl = () => document.querySelector('.stage-mascot');
+      const layerEls = () => [...mascotEl().querySelectorAll(':scope > span > span')];
+
+      /** background-position "50% 0%" → cell index → direction name. */
+      function dirFromPosition(bg) {
+        const m = /^(-?\d+(?:\.\d+)?)%\s+(-?\d+(?:\.\d+)?)%$/.exec(bg || '');
+        if (!m) return null;
+        const i = Math.round(Number(m[1]) / 50) + Math.round(Number(m[2]) / 50) * 3;
+        return DIRECTIONS[i] ?? null;
+      }
+
+      /**
+       * The pose the component is heading for. Read from the inline style, not
+       * computed: the inline opacity is the transition's *target*, while computed
+       * opacity is wherever the (frozen, under automation) timeline happens to be.
+       */
+      function visiblePose() {
+        const ls = layerEls();
+        for (let i = 0; i < 2; i++) {
+          if (parseFloat(ls[i].style.opacity || '0') > 0.5) {
+            return dirFromPosition(ls[i].style.backgroundPosition);
+          }
+        }
+        return null;
+      }
+
+      const stage = () => {
+        const r = mascotEl().getBoundingClientRect();
+        return { cx: r.left + r.width / 2, cy: r.top + r.height / 2, w: r.width, h: r.height };
+      };
+
+      // ── Synthetic input ─────────────────────────────────────────────────────
+
+      function makeTouch(x, y) {
+        return new Touch({
+          identifier: 1,
+          target: document.body,
+          clientX: x,
+          clientY: y,
+          pageX: x,
+          pageY: y,
+          screenX: x,
+          screenY: y,
+          radiusX: 4,
+          radiusY: 4,
+          force: 1,
+        });
+      }
+
+      /** Dispatches a legacy TouchEvent on window, as older iOS Safari would. */
+      function touchEvent(type, x, y) {
+        const t = makeTouch(x, y);
+        const live = type === 'touchend' || type === 'touchcancel' ? [] : [t];
+        const ev = new TouchEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          touches: live,
+          targetTouches: live,
+          changedTouches: [t],
+        });
+        window.dispatchEvent(ev);
+        return ev;
+      }
+
+      function mouseMove(x, y) {
+        const ev = new PointerEvent('pointermove', {
+          pointerType: 'mouse',
+          clientX: x,
+          clientY: y,
+          bubbles: true,
+          composed: true,
+        });
+        ev.__synthetic = true;
+        window.dispatchEvent(ev);
+      }
+
+      /** Ends any gesture and waits out the deferred return-to-centre. */
+      async function settle() {
+        touchEvent('touchend', 0, 0);
+        await sleep(760);
+      }
+
+      // ── Crossfade measurement ───────────────────────────────────────────────
+
+      /**
+       * The document is typically hidden under automation, so its timeline is
+       * frozen (`document.timeline.currentTime === 0`) and transitions never
+       * advance — sampling frames proves nothing. Seek the live transitions with
+       * `currentTime` instead: a seek is a hold, so computed style reflects it even
+       * while the document's own timeline is stuck.
+       */
+      async function grabOpacityTransitions(timeout = 2500) {
+        const started = performance.now();
+        while (performance.now() - started < timeout) {
+          const found = layerEls()
+            .map((el) => ({
+              el,
+              anim: el.getAnimations().find((a) => a.transitionProperty === 'opacity'),
+            }))
+            .filter((x) => x.anim);
+          if (found.length >= 2) return found;
+          await sleep(30);
+        }
+        return [];
+      }
+
+      const opacityAt = (el) => parseFloat(getComputedStyle(el).opacity);
+
+      // ── The run ─────────────────────────────────────────────────────────────
+
+      const root = createRoot(document.getElementById('mount'));
+
+      async function run() {
+        blockRealMouse();
+        pinHoverCapability();
+        countListeners();
+
+        counting = true;
+        root.render(
+          React.createElement(EnhancedMascot, {
+            directions: '/mascots/fox-directions.webp',
+            reactions: '/mascots/fox-reactions.webp',
+            size: 220,
+            label: 'Fox',
+            className: 'stage-mascot',
+            onBoop: () => {},
+          })
+        );
+        await sleep(400);
+        counting = false;
+
+        // ── Static shape ──────────────────────────────────────────────────────
+
+        await check('the stage mascot carries no drop-shadow filter', () =>
+          eq(getComputedStyle(mascotEl()).filter, 'none', 'filter')
+        );
+
+        await check('the sprite renders exactly three layers', () =>
+          eq(layerEls().length, 3, 'layer count')
+        );
+
+        await check('two direction layers share the directions sheet, the third the reactions sheet', () => {
+          const ls = layerEls();
+          const [a, b, c] = ls.map((el) => el.style.backgroundImage);
+          if (a !== b) return 'the two direction layers use different sheets';
+          if (!a.includes('directions')) return `first layer is not the directions sheet: ${a.slice(0, 60)}`;
+          if (!c.includes('reactions')) return `third layer is not the reactions sheet: ${c.slice(0, 60)}`;
+          return true;
+        });
+
+        await check('the shell opts out of browser gestures with touch-action: manipulation', () =>
+          eq(getComputedStyle(mascotEl()).touchAction, 'manipulation', 'touch-action')
+        );
+
+        // ── Touch ─────────────────────────────────────────────────────────────
+
+        await check('a touch in the middle band steers the gaze', async () => {
+          const { cx, cy } = stage();
+          touchEvent('touchstart', cx + 120, cy);
+          await sleep(40);
+          return eq(visiblePose(), 'right', 'pose');
+        });
+
+        await check('a gaze drag suppresses the native scroll', async () => {
+          const { cx, cy } = stage();
+          const ev = touchEvent('touchmove', cx + 150, cy);
+          await sleep(40);
+          return eq(ev.defaultPrevented, true, 'defaultPrevented');
+        });
+
+        await check('the pose is held after the finger lifts', async () => {
+          touchEvent('touchend', 0, 0);
+          await sleep(160);
+          return eq(visiblePose(), 'right', 'pose at 160ms');
+        });
+
+        await check('the gaze settles back to centre', async () => {
+          await sleep(760);
+          return eq(visiblePose(), 'center', 'pose at ~920ms');
+        });
+
+        await check('a corner drag looks down-left', async () => {
+          const { cx, cy } = stage();
+          touchEvent('touchstart', cx - 120, cy + 120);
+          await sleep(40);
+          return eq(visiblePose(), 'down-left', 'pose');
+        });
+
+        await check('the corner pose holds for a beat', async () => {
+          await sleep(180);
+          return eq(visiblePose(), 'down-left', 'pose at 180ms');
+        });
+
+        await check('the corner pose settles back to centre', async () => {
+          await settle();
+          return eq(visiblePose(), 'center', 'pose after settle');
+        });
+
+        // An edge-started swipe is the OS's, so it must neither steer nor be eaten.
+        const { cx: ecx, cy: ecy } = stage();
+        mouseMove(ecx + 140, ecy);
+        await sleep(60);
+
+        await check('an edge-started swipe does not steer the gaze', async () => {
+          touchEvent('touchstart', 10, ecy);
+          touchEvent('touchmove', 90, ecy);
+          await sleep(40);
+          return eq(visiblePose(), 'right', 'pose');
+        });
+
+        await check('an edge-started swipe is not prevented', () =>
+          eq(touchEvent('touchmove', 150, ecy).defaultPrevented, false, 'defaultPrevented')
+        );
+
+        await check('a vertical drag is left to the page', async () => {
+          touchEvent('touchend', 0, 0);
+          await sleep(60);
+          const ev = (() => {
+            touchEvent('touchstart', ecx, ecy);
+            return touchEvent('touchmove', ecx + 4, ecy + 140);
+          })();
+          await sleep(40);
+          const prevented = eq(ev.defaultPrevented, false, 'defaultPrevented');
+          return prevented === true ? eq(visiblePose(), 'center', 'pose') : prevented;
+        });
+
+        await settle();
+
+        // ── Mouse ─────────────────────────────────────────────────────────────
+
+        await check('mouse movement steers the gaze', async () => {
+          const { cx, cy } = stage();
+          mouseMove(cx + 150, cy);
+          await sleep(60);
+          return eq(visiblePose(), 'right', 'pose');
+        });
+
+        await check('a second mouse movement steers again', async () => {
+          const { cx, cy } = stage();
+          mouseMove(cx, cy - 150);
+          await sleep(60);
+          return eq(visiblePose(), 'up', 'pose');
+        });
+
+        await check('a mouse move during a touch drag is ignored', async () => {
+          const { cx, cy } = stage();
+          mouseMove(cx - 150, cy);
+          await sleep(60);
+          touchEvent('touchstart', cx, cy + 150); // steer to "down"
+          await sleep(50);
+          const duringTouch = visiblePose();
+          mouseMove(cx + 150, cy - 150); // must not steal the drag
+          await sleep(60);
+          const afterMouse = visiblePose();
+          if (duringTouch !== 'down') return `setup: expected the touch to steer to down, got ${duringTouch}`;
+          return eq(afterMouse, 'down', 'pose after the stray mouse move');
+        });
+
+        await check('mouse steering resumes once the touch ends', async () => {
+          await settle();
+          const { cx, cy } = stage();
+          mouseMove(cx + 150, cy);
+          await sleep(60);
+          return eq(visiblePose(), 'right', 'pose');
+        });
+
+        // ── Crossfade ─────────────────────────────────────────────────────────
+
+        await check('direction layers crossfade over 340ms with the documented curve', () => {
+          const cs = getComputedStyle(layerEls()[0]);
+          return eq(
+            `${cs.transitionProperty} ${cs.transitionDuration} ${cs.transitionTimingFunction}`,
+            'opacity 0.34s cubic-bezier(0.33, 0, 0.2, 1)',
+            'transition'
+          );
+        });
+
+        // Kick off a fresh turn, then capture the two live transitions.
+        const { cx: tcx, cy: tcy } = stage();
+        mouseMove(tcx, tcy - 150);
+        await sleep(40);
+        mouseMove(tcx + 150, tcy);
+        const transitions = await grabOpacityTransitions();
+
+        await check('a turn runs exactly two opacity transitions', () =>
+          eq(transitions.length, 2, 'live transitions')
+        );
+
+        const blend = [];
+        if (transitions.length === 2) {
+          // The incoming layer is the one whose inline opacity target is 1.
+          const incomingIndex = transitions.findIndex(({ el }) => el.style.opacity === '1');
+          const resolvedIncoming = incomingIndex === -1 ? 0 : incomingIndex;
+          const resolvedOutgoing = resolvedIncoming === 0 ? 1 : 0;
+
+          // The document timeline is frozen, so the transitions are captured at
+          // currentTime 0; read that sample directly. Seeking to exactly 0 pushes
+          // an animation to 'idle', and seeking to exactly the duration (340)
+          // detaches it, so only 85/170/255/339 are sought.
+          const at0 = [opacityAt(transitions[resolvedIncoming].el), opacityAt(transitions[resolvedOutgoing].el)];
+          const seek = (t) => {
+            for (const { anim } of transitions) anim.currentTime = t;
+          };
+          const readIncoming = () => opacityAt(transitions[resolvedIncoming].el);
+
+          blend.push(at0[0]);
+          // 340 (= the full duration) is avoided: seeking to the exact end
+          // completes and detaches the transition, so 339 (≈ 1.000) is used.
+          for (const t of [85, 170, 255, 339]) {
+            seek(t);
+            await sleep(0);
+            blend.push(readIncoming());
+          }
+          const atEnd = [readIncoming(), opacityAt(transitions[resolvedOutgoing].el)];
+
+          await check('the incoming layer starts invisible and the outgoing one fully visible', () =>
+            Math.abs(at0[0]) < 0.02 && Math.abs(at0[1] - 1) < 0.02
+              ? true
+              : `at 0ms incoming=${at0[0].toFixed(3)} outgoing=${at0[1].toFixed(3)}`
+          );
+
+          await check('the blend is genuinely mid-way at the halfway point', () => {
+            const mid = blend[2];
+            return mid > 0.05 && mid < 0.95
+              ? true
+              : `at 170ms incoming=${mid.toFixed(3)} (expected strictly between 0 and 1)`;
+          });
+
+          await check('the crossfade completes on the incoming pose', () =>
+            Math.abs(blend[4] - 1) < 0.02 ? true : `at 340ms incoming=${blend[4].toFixed(3)}`
+          );
+
+          await check('the blend advances monotonically', () => {
+            for (let i = 1; i < blend.length; i++) {
+              if (blend[i] < blend[i - 1] - 0.001) {
+                return `regressed at ${[0, 85, 170, 255, 339][i]}ms: ${blend
+                  .map((v) => v.toFixed(3))
+                  .join(' → ')}`;
+              }
+            }
+            return true;
+          });
+        } else {
+          for (const name of [
+            'the incoming layer starts invisible and the outgoing one fully visible',
+            'the blend is genuinely mid-way at the halfway point',
+            'the crossfade completes on the incoming pose',
+            'the blend advances monotonically',
+          ]) {
+            await check(name, () => 'no live opacity transitions to seek');
+          }
+        }
+
+        // ── Listener hygiene ──────────────────────────────────────────────────
+
+        await check('the reaction layer fades faster than a direction turn', () =>
+          eq(
+            getComputedStyle(layerEls()[2]).transition,
+            'opacity 0.22s ease-in-out',
+            'reaction transition'
+          )
+        );
+
+        // ── Listener hygiene ──────────────────────────────────────────────────
+
+        await check('the doubly-registered events are exactly pointermove and touchmove', () => {
+          const expected = {
+            'window:pointermove': 2,
+            'window:touchmove': 2,
+            'window:pointerdown': 1,
+            'window:pointerup': 1,
+            'window:touchstart': 1,
+            'window:touchend': 1,
+            'window:scroll': 1,
+          };
+          for (const [k, n] of Object.entries(expected)) {
+            if ((added.get(k) || 0) !== n) return `${k}: expected ${n} adds, saw ${added.get(k) || 0}`;
+          }
+          return true;
+        });
+
+        await check('unmounting removes every listener it added', async () => {
+          counting = true; // the removals happen in the unmount cleanup
+          root.unmount();
+          await sleep(60);
+          counting = false;
+          const leaks = [...added.keys()].filter((k) => (removedCount.get(k) || 0) !== added.get(k));
+          return leaks.length === 0
+            ? true
+            : `leaked: ${leaks.map((k) => `${k} (${added.get(k)} add / ${removedCount.get(k) || 0} remove)`).join(', ')}`;
+        });
+
+        render();
+      }
+
+      run();
+    </script>
+  </body>
+</html>

@@ -12,11 +12,13 @@
 | **1c** | Persist generated mascots | **Done** — IndexedDB + cache |
 | **1e** | Torso lock | **Done** — torso pixel-identical |
 | **1f** | Tap highlight + touch gaze | **Done** |
-| **1g** | Down-row head clipping | **Partial** — see below |
-| **1h** | No shadow, softer turns, touch zones | **Done** — 27/27 checks |
-| **1** | Generation pipeline | Prompts validated; live run pending |
+| **1g** | Down-row head clipping | **Done** — the crown guard never binds (1j) |
+| **1h** | No shadow, softer turns, touch zones | **Done** — 27/27, harness committed |
+| **1i** | Surface upstream errors, downscale, retry | **Done** — 0 credits |
+| **1j** | First live end-to-end run | **Done** — 18/18 stickers, 3 credits |
+| **1** | Generation pipeline | **Done** — verified live (1j) |
 | **2** | Cursor feel | Done via 1e/1f |
-| **6** | Cleanup + README | Not started |
+| **6** | Cleanup + README | **Done** |
 
 ---
 
@@ -129,8 +131,11 @@ reads `size` from a ref, instead of being torn down and re-added on every render
 The dead-zone now scales with mascot size (`42%`, min 48px) rather than being a
 fixed 70px.
 
-**Still to do:** continuous "lean" layer, idle blink/breathing, and touch support
-(tracking is currently disabled entirely on touch devices).
+**Since done:** touch support landed in Phases 1f and 1h — a drag anywhere in the
+safe middle band steers the gaze, edge swipes stay with the OS, and the pose eases
+back to centre on release. A continuous "lean" layer and idle blinking were not
+built; instead the mascot drifts through the eight angles on its own when
+untouched (Phase 1h).
 
 ## Phase 5 — Mobile responsive (layout done)
 
@@ -181,9 +186,10 @@ on genuine viewport size:
 
 The harness file was removed after use.
 
-**Still to do (Phase 2):** the mascot does not follow a finger on touch devices —
-the `hover: hover` gate disables tracking entirely there. Layout is mobile-ready;
-the gaze interaction is not.
+**Closed later:** the touch gaze gap called out here was fixed in Phases 1f/1h —
+see the touch rows in Phase 1h's check table. Real-finger scroll arbitration on a
+physical device is still the one thing the automation browser cannot exercise: it
+offers no trusted input dispatch or device emulation.
 
 ---
 
@@ -274,9 +280,17 @@ a small feathered edge band. So transparency is already correct.
 
 Outstanding work:
 - Confirm visually in the app (checkerboard preview) rather than only numerically.
-- The die-cut white sticker border is currently applied only on the procedural
+- ~~The die-cut white sticker border is currently applied only on the procedural
   fallback path, not to model-generated sheets — so generated stickers may look
-  flatter than the presets. Apply consistently.
+  flatter than the presets. Apply consistently.~~ **Retired in Phase 1j.** Measured
+  across all three sheet sources, the presets carry **no** die-cut border either
+  (0.00% near-white edge pixels) and a freshly generated AI sheet matches them
+  exactly; the *procedural fallback* is the only source with a faint outline
+  (3.03%). Adding one to AI sheets would have made generated stickers inconsistent
+  with all eight presets. No change made.
+
+Confirmed live in Phase 1j: the generated directions sheet is 68.5% transparent
+and the reactions sheet 58.1%, and all 18 sliced stickers are ~68% transparent.
 
 ---
 
@@ -439,10 +453,11 @@ time (a cursor present should steer) — the harness only blocks the *real* mous
 between gestures and drives the mouse path explicitly with marked synthetic
 `PointerEvent`s, so the precedence rule is asserted rather than assumed.
 
-The harness (`__touch.html`, a root-level page that mounts `EnhancedMascot`
-directly against the preset `fox` sheets) was removed after use, as with the
-earlier phases. It needs a running `npx vite` dev server and can be rebuilt from
-the checks in the table above.
+The harness (a root-level page that mounts `EnhancedMascot` directly against the
+preset `fox` sheets) was a throwaway during this phase, as with the earlier
+phases. **Phase 1j committed it as `gaze-harness.html`** — the table above is
+still the specification, but the checks are now executable rather than prose. It
+needs a running `npx vite` dev server.
 
 `tsc` clean · 0 lint errors · build passes. No credits used.
 
@@ -545,8 +560,101 @@ Image model error (502) on attempt 3: …
 - `tsc` clean · 0 lint errors · build passes.
 
 **Credits spent: 0.** A 502 means the provider never generated, so nothing was
-billed on any of the attempts. The end-to-end pipeline still has not completed —
-it is blocked on the upstream outage, not on our code.
+billed on any of the attempts. At the time this was written the end-to-end
+pipeline still had not completed — blocked on the upstream outage, not our code.
+It completed the next day; see Phase 1j.
+
+---
+
+## Phase 1j — the end-to-end run, and two assumptions retired
+
+The outage cleared, the retry loop's patience paid off, and a real photo went
+through the whole pipeline. That closes Phase 1.
+
+### The run
+
+`scratch/test.jpeg` (4080×3072, 744 KB) → **3 credits**.
+
+| Stage | Result |
+|---|---|
+| upload | downscaled to 1280×964, 0.27 MB |
+| stage 1 — bust | model returned a 1190×896 bust |
+| stage 2 — directions sheet | accepted as `ai` (no fallback) |
+| stage 3 — reactions sheet | accepted as `ai` (no fallback) |
+| stickers | **18/18** valid 512×512 transparent `image/webp` |
+| torso lock | one shared torso — `1/9` unique signatures |
+| persistence | 18 stickers + the "Yours" chip restored after a full reload |
+
+No error text in the DOM, no console errors, `Download all` enabled. Nothing
+downstream of the API still needed proving — slicing, torso lock, stickers and
+persistence had all been verified separately. This was the smoke test that joined
+them up, and it passed.
+
+### Assumption 1 retired: the presets never had a die-cut border
+
+Phase 1d claimed the white die-cut border was "applied only on the procedural
+fallback path, not to model-generated sheets — so generated stickers may look
+flatter than the presets". Measured, that is backwards. Counting opaque pixels
+that sit on the silhouette edge and are near-white:
+
+| Sheet | Edge pixels | Near-white |
+|---|---|---|
+| preset `fox-directions` (curated reference) | 7,980 | **0.00%** |
+| AI directions sheet, just generated | — | **0.00%** |
+| procedural fallback directions | 7,172 | **3.03%** |
+
+The presets carry no border, so a generated sheet already matches them; it is the
+*fallback* that carries the faint outline. Adding a die-cut to AI sheets would
+have made generated stickers inconsistent with all eight presets. **No change
+made** — the Phase 1d entry was corrected instead.
+
+### Assumption 2 retired: the crown guard never binds
+
+Phase 1h capped head height at `torsoTop - neckOverlap - CROWN_CLEARANCE` so tall
+down-gaze poses could not crop the crown, and the worry was that the cap quietly
+shrinks those tall heads. `crownClearanceRatio` is now a parameter, and the same
+nine cells were locked at three values:
+
+| Clearance ratio | 0.15 | 0.05 (default) | 0.00 |
+|---|---|---|---|
+| head top, all nine cells | 50px | 50px | 50px |
+| pixels differing from default | 0 | — | **0** |
+
+Byte-identical. The natural median head height sits more than 54px — 15% of the
+cell — clear of the cap, so it never fires on real art. The parameter stays
+because it is *how* the claim was checked, and it costs nothing at the default.
+
+### The gaze harness is now committed
+
+Phase 1h's 27 checks used to live in a throwaway page deleted after the run, so
+every claim had to be re-earned from prose. They are now `gaze-harness.html` at
+the repo root:
+
+- imports `EnhancedMascot` against the preset fox sheets and drives it with
+  synthetic `TouchEvent`s and marked `PointerEvent`s;
+- blocks genuine mouse input at the capture phase, so the automation cursor
+  cannot steer the mascot between assertions;
+- pins the hover media query on, so the touch-only idle sweep cannot change the
+  pose mid-assertion;
+- seeks the crossfade with the Web Animations API (`currentTime`) instead of
+  sampling frames, because a hidden document freezes `document.timeline`;
+- prints a PASS/FAIL table and exposes `window.__gazeHarness` for automation.
+
+**27/27 passing.** It is a dev-only page — Vite's only build entry is
+`index.html`, so it never reaches `dist/`. It earned its keep on the first run:
+the listener-leak check failed and exposed a bug in the harness's own counter,
+not in the component.
+
+### Verified
+
+- Live run: 18/18 stickers, both sheets from the model, persistence intact.
+- Die-cut: measured across three sheet sources (table above).
+- Crown guard: pixel-identical at three clearance ratios.
+- Gaze harness: 27/27.
+- `tsc` clean · 0 lint errors · build passes.
+
+**Credits spent: 3** — one successful run. The two 502 runs that preceded it cost
+nothing.
 
 ---
 
@@ -624,3 +732,35 @@ Confirmed, as you noted. This affects the pre-existing presets and any newly
 generated mascot equally: the nine "directions" are still a flat bust rotated
 ±3.5°, which is why they do not match the Fox art. Phase 1 addresses this and the
 API key is now present in `.env`.
+
+---
+
+## Phase 6 — cleanup + README
+
+### Cleanup
+- The nine gaze angles and nine reactions moved out of `EnhancedMascot.tsx` into
+  `src/utils/mascotPoses.ts`. The component file now exports only components, so
+  editing a constant no longer forces a full Fast Refresh of the file (oxlint's
+  two `only-export-components` warnings are gone) and the gaze harness shares the
+  real ordering instead of a copy of it.
+- `gaze-harness.html` is the only new root file, and it is intentional.
+- Four `set-state-in-effect` warnings remain in the component. They are
+  structural — the effect loads the two sheets and flips a `ready` flag when they
+  arrive — and rewriting them would mean restructuring the image-preload path for
+  a warning, so they stay. `oxlint` reports **0 errors**.
+- `.env.example`'s stale model comment (it still named the old
+  `google/gemini-2.5-flash-image`) was corrected to `google/gemini-3.1-flash-image`.
+
+### README
+`README.md` described an app that no longer exists: six art styles, a Tailwind
+demo scaffold, a poke/combo counter, a 70px fixed dead zone, and a Pages Function
+pipeline that was still "planned". It now documents what ships — the three-section
+page, the eight presets, the two AI sheets plus bust, the chroma key, the torso
+lock, the fallback ladder, upload downscaling, retry and the user-facing error
+messages, IndexedDB persistence, the gaze behaviour constants and the committed
+harness, how to run, build and deploy, and the 3-credit cost per generation.
+
+### Verified
+`tsc` clean · 0 lint errors · build passes · harness 27/27.
+
+---

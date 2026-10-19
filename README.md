@@ -1,107 +1,102 @@
-# 🦊 Mascot Playground & Studio
+# Page Mascot Studio
 
-> An interactive web playground and avatar generator for cursor-tracking 3×3 sprite page mascots with physics-driven reactions, art styles, and 18-sticker chat export.
+Turn a photo into a cursor-tracking mascot and 18 downloadable 512×512
+transparent WebP stickers.
 
-[![React](https://img.shields.io/badge/React-18.x-61dafb?style=flat&logo=react)](https://react.dev)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?style=flat&logo=typescript)](https://www.typescriptlang.org)
-[![Vite](https://img.shields.io/badge/Vite-8.x-646cff?style=flat&logo=vite)](https://vitejs.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## What it does
 
----
+- **Eight preset mascots** (Fox, Bear, Red Panda, Owl, Cat, Astronaut,
+  Gearbot, Wizard) on a cursor-tracking stage — eight-way gaze with a dead zone
+  so the head settles instead of jittering.
+- **Tap the mascot** for a reaction. Rapid taps cycle through nine expressions:
+  blink, heart, sparkle, surprised, wink, bashful, sleepy, dizzy, delighted.
+- **Make your own** from a photo: the app generates a chibi bust plus two 3×3
+  sprite sheets, chroma-keys and torso-locks them, and slices 18 stickers you can
+  download individually or as a ZIP.
+- **Nothing is lost** — generated mascots are kept in IndexedDB, so they survive
+  a refresh and a switch to a preset.
+- **Responsive** down to 320px, with 44px tap targets and no horizontal overflow.
+- **Touch works**: a drag in the safe middle band steers the gaze; edge swipes
+  stay with the operating system.
 
-## ✨ Features
+## How a mascot is made
 
-- **🎯 8-Way Cursor Tracking:** Real-time gaze tracking with 70px circular dead-zone hysteresis to eliminate jitter and give the mascot an organic, lifelike presence.
-- **💥 Interactive Poke & Reaction Physics:** Rapid-click combo counter, squash-and-stretch CSS keyframe physics, and 9 expressive reactions (*Blink, Heart Eyes, Sparkles, Surprised, Wink, Bashful, Sleepy, Dizzy @_@, and Delighted*).
-- **📸 Client-Side Photo Lab & Sticker Rig:** Turn any solo portrait into an authentic WhatsApp/Telegram die-cut sticker bust. Features automated image validation (resolution, brightness, Laplacian sharpness), natural bust contour cutout, cel-shaded color balancing, white die-cut borders, and ambient drop shadows.
-- **🎨 6 Visual Art Styles:** Switch between `Colour`, `Ink`, `Sketch`, `Riso` (risograph print), `Paper` (cut-paper craft), and `Pixel` (retro 32px sprites). Native artist-drawn sheets for Fox with instant GPU shader fallbacks for all other mascots and custom uploads.
-- **📦 18-Sticker WhatsApp / Telegram Pack Exporter:** Slice 3×3 sprite sheets into 512×512 transparent WebP stickers. Download individual stickers or bundle all 18 into a formatted `.zip` archive ready for messaging apps or Discord custom emojis.
-- **🛠️ Props Tuner & Live Code Snippet Generator:** Tune dimensions (80px – 320px), toggle perch mode (half-body bottom shelf docking), audio feedback, and copy drop-in JSX integration code.
-- **🔍 3×3 Sprite Atlas Inspector:** Frame-by-frame grid inspector with coordinate crosshairs and hover telemetry.
+Three image generations against `google/gemini-3.1-flash-image` (backdrop
+`#FB0BF8`):
 
----
+1. **Bust** — identity anchor.
+2. **Directions sheet** — 3×3 grid of the nine gaze angles.
+3. **Reactions sheet** — 3×3 grid of the nine expressions.
 
-## 🚀 Quick Start
+A fourth, text-only call (`google/gemini-2.5-flash`) describes the bust in one
+sentence to reinforce identity; it is non-fatal.
 
-### Prerequisites
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
-- `npm` or `pnpm`
+Client side, `src/utils/chromaKey.ts` keys out the backdrop
+(`green < min(red, blue) - 55`), extracts the 3×3 grid, locks the torso so all
+nine cells share one shoulders/shirt/framing, and repairs any cell whose head is
+out of line. `src/utils/proceduralSpriteGenerator.ts` is the fallback ladder if a
+sheet is rejected: first the model's own sheet, then a procedural rig from the
+bust. `src/utils/stickerSlicer.ts` slices the 1080×1080 sheets into 18 × 512×512
+transparent WebP stickers.
 
-### Installation
+## Running
 
-```bash
-# Clone the repository
-git clone https://github.com/imVVerma/Trying-Page-Mascot.git
-cd Trying-Page-Mascot
-
-# Install dependencies
+```sh
 npm install
-
-# Start local development server
+cp .env.example .env   # then put your AICREDITS_API_KEY in .env
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) (or the port indicated in your terminal) in your browser.
+Open http://localhost:5173. The dev server proxies `/api/generate` to the real
+Pages Function in `functions/api/generate.ts`, so the two can never drift apart.
 
-### Production Build
+## Building and checking
 
-```bash
-npm run build
-npm run preview
+```sh
+npm run lint        # oxlint, 0 errors
+npm run build       # tsc -b && vite build
 ```
 
----
+The gaze behaviour has its own committed harness: open `/gaze-harness.html` while
+`npm run dev` is running. It runs 27 assertions covering shadow removal, turn
+softness, touch zones, mouse/touch precedence and the crossfade curve.
 
-## 📁 Project Structure
+## Deploying (Cloudflare Pages)
+
+1. Connect the repo to a Cloudflare Pages project.
+2. Build command: `npm run build`; output directory: `dist`.
+3. In the Pages dashboard, set `AICREDITS_API_KEY` as an environment variable
+   for both Production and Preview. Never rename it to a `VITE_*` variable — Vite
+   inlines those into the client bundle.
+4. Optional overrides: `AICREDITS_IMAGE_MODEL`, `AICREDITS_VISION_MODEL`.
+
+The Pages Function `functions/api/generate.ts` handles the upstream calls and a
+per-IP rate limit (10 generations per minute).
+
+## Cost
+
+One successful generation costs **3 credits** (three image calls). A transient
+upstream 502 is retried three times with backoff and, since no image is
+produced, costs nothing.
+
+## Project layout
 
 ```
-Trying-Page-Mascot/
-├── public/
-│   ├── favicon.svg             # Custom branded watcher mascot vector icon
-│   ├── icons.svg               # SVG sprite definitions
-│   └── mascots/                # Official local 3x3 sprite sheets (Fox 6 styles)
-├── src/
-│   ├── components/
-│   │   └── EnhancedMascot.tsx  # Enhanced cursor tracker, squash physics & audio
-│   ├── utils/
-│   │   ├── photoValidator.ts   # Laplacian variance & luminance photo validator
-│   │   ├── proceduralSpriteGenerator.ts # Die-cut sticker synthesizer & 3x3 atlas rig
-│   │   └── stickerSlicer.ts    # 512x512 WebP slicer, style filter & ZIP packager
-│   ├── App.tsx                 # Studio navigation, playground & reactive controls
-│   ├── App.css                 # Dark mode glassmorphic UI design system
-│   └── main.tsx                # App entry point
-├── index.html
-├── package.json
-└── README.md
+src/
+  App.tsx                       three-section page
+  components/                   EnhancedMascot, UploadPanel, StickerPack
+  services/mascotService.ts     upload downscaling + generateMascot
+  utils/chromaKey.ts            keying, grid extraction, torso lock
+  utils/proceduralSpriteGenerator.ts  fallback ladder + bust die-cut
+  utils/stickerSlicer.ts        18 x 512 WebP + ZIP
+  utils/mascotStorage.ts        IndexedDB persistence
+  utils/photoValidator.ts       local photo report
+  utils/mascotPoses.ts          the nine gaze angles and nine reactions
+functions/api/generate.ts       Cloudflare Pages Function (the only secret holder)
+gaze-harness.html               dev-only gaze behaviour harness
+PLAN.md                         phase-by-phase implementation log
 ```
 
----
+## Licence
 
-## 🎨 3×3 Sprite Sheet Specification
-
-Each mascot consists of two 3×3 sprite atlases (usually 1080×1080px or 768×768px):
-
-1. **Directions Sheet (`*-directions.webp`):**
-   - Row 0: `Up-Left` | `Up` | `Up-Right`
-   - Row 1: `Left` | `Center (Neutral)` | `Right`
-   - Row 2: `Down-Left` | `Down` | `Down-Right`
-
-2. **Reactions Sheet (`*-reactions.webp`):**
-   - Row 0: `Blink` | `Heart Eyes` | `Sparkle`
-   - Row 1: `Surprised` | `Wink` | `Bashful`
-   - Row 2: `Sleepy` | `Dizzy` | `Delighted`
-
----
-
-## 🤝 Acknowledgements & Credits
-
-- Core concept and original mascot artwork inspired by [`page-mascot`](https://github.com/kamranahmedse/page-mascot) by [Kamran Ahmed](https://github.com/kamranahmedse).
-- Icons provided by [Lucide React](https://lucide.dev/).
-- Confetti effects powered by [canvas-confetti](https://github.com/catdad/canvas-confetti).
-- Zip archiving powered by [JSZip](https://stuk.github.io/jszip/).
-
----
-
-## 📄 License
-
-This project is open-source and released under the [MIT License](LICENSE).
+MIT.

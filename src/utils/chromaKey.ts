@@ -317,15 +317,27 @@ function splitCell(
 }
 
 /**
+ * Vertical gap kept above the tallest head, as a fraction of the cell width.
+ *
+ * The lock seats every head at the same height, so a single constraint applies
+ * to all nine cells at once. This is the default the app uses.
+ */
+export const CROWN_CLEARANCE_RATIO = 0.05;
+
+/**
  * Re-composites a 3x3 sheet so every cell shares one torso.
  *
  * All nine heads are scaled to a common height and anchored identically, then
  * laid over a single reference torso. Only the drawn head pose differs between
  * cells, so shoulders, shirt and framing are pixel-identical throughout.
+ *
+ * `crownClearanceRatio` exists so the crown guard's effect can be measured
+ * against an uncapped render; production callers omit it.
  */
 export function lockTorsoAcrossSheet(
   cells: HTMLCanvasElement[],
-  size = 1080
+  size = 1080,
+  crownClearanceRatio = CROWN_CLEARANCE_RATIO
 ): HTMLCanvasElement {
   const cell = size / 3;
   const out = document.createElement('canvas');
@@ -392,7 +404,12 @@ export function lockTorsoAcrossSheet(
   // the highest hair still clears the top by CROWN_CLEARANCE, shrinking only as
   // much as the tallest pose requires — every cell still shares one head scale,
   // so the mascot does not pulse as it turns.
-  const CROWN_CLEARANCE = Math.round(srcCell * 0.05);
+  //
+  // This is the one place the lock can shrink heads below their natural size
+  // rather than merely re-seating them, so the ratio is a parameter: passing 0
+  // renders the uncapped result, which is how the cap's actual cost is measured
+  // (see Phase 1j).
+  const CROWN_CLEARANCE = Math.round(srcCell * crownClearanceRatio);
   const maxHeadH = torsoTop - neckOverlap - CROWN_CLEARANCE;
   if (targetHeadH > maxHeadH && maxHeadH > 0) {
     targetHeadH = maxHeadH;

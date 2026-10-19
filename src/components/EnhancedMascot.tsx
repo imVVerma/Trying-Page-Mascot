@@ -1,31 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-
-export const DIRECTIONS = [
-  'up-left',
-  'up',
-  'up-right',
-  'left',
-  'center',
-  'right',
-  'down-left',
-  'down',
-  'down-right',
-] as const;
-
-export const REACTIONS = [
-  'blink',
-  'heart',
-  'sparkle',
-  'surprised',
-  'wink',
-  'bashful',
-  'sleepy',
-  'dizzy',
-  'delighted',
-] as const;
-
-export type Direction = (typeof DIRECTIONS)[number];
-export type Reaction = (typeof REACTIONS)[number];
+import {
+  DIRECTIONS,
+  REACTIONS,
+  type Direction,
+  type Reaction,
+} from '../utils/mascotPoses';
 
 /** Clockwise from right, matching atan2 with y pointing down. */
 const CLOCKWISE: Direction[] = [
