@@ -13,7 +13,7 @@
 | **1e** | Torso lock | **Done** — torso pixel-identical |
 | **1f** | Tap highlight + touch gaze | **Done** |
 | **1g** | Down-row head clipping | **Partial** — see below |
-| **1h** | No shadow, softer turns, touch zones | **Done** — 20/20 checks |
+| **1h** | No shadow, softer turns, touch zones | **Done** — 27/27 checks |
 | **1** | Generation pipeline | Prompts validated; live run pending |
 | **2** | Cursor feel | Done via 1e/1f |
 | **6** | Cleanup + README | Not started |
@@ -383,7 +383,7 @@ crossfade instead of an instant `backgroundPosition` jump:
   screen did nothing until it was already far off centre.
 
 ### Verified
-Browser harness, 20 assertions, all green:
+Browser harness, 27 assertions, all green:
 
 | Check | Result |
 |---|---|
@@ -391,19 +391,58 @@ Browser harness, 20 assertions, all green:
 | sprite layers | `3` (underlay removed) |
 | touchstart in the middle band steers | faces `right` |
 | gaze drag suppresses native scroll | `defaultPrevented=true` |
-| pose holds after finger lifts | still `right` at 150ms |
-| settled back to centre | `center` at ~800ms |
+| pose holds after finger lifts | still `right` at 160ms |
+| settled back to centre | `center` at ~860ms |
+| mouse move **during** a touch drag | ignored (gaze unchanged) |
+| mouse steering with no touch active | follows, then follows again |
 | edge-started swipe | no steer, `defaultPrevented=false` |
 | vertical drag | `defaultPrevented=false` (page scrolls) |
 | corner drag | faces `down-left`, holds 180ms, then centres |
 | crossfade config | `opacity 0.34s cubic-bezier(0.33, 0, 0.2, 1)` |
+| crossfade interpolation | `0.000 → 0.315 → 0.791 → 0.960 → 1.000`, monotonic |
 
-Harness-only caveats: the automation browser reports `document.visibilityState
-= 'hidden'`, so its animation timeline is frozen (`document.timeline.currentTime
-= 0`) — the crossfade is verified by its target values and transition
-configuration, not by sampling frames. The harness also has to block real
-`pointermove` events, because a mouse parked over the page re-aims the mascot
-between synthetic touches.
+### The crossfade is measured, not assumed
+The automation browser reports `document.visibilityState = 'hidden'`, so its
+animation timeline is frozen (`document.timeline.currentTime = 0`) and CSS
+transitions never advance — sampling frames proves nothing.
+
+Solved by **seeking** the transitions instead of sampling them: grab the two
+live `opacity` transitions with `getAnimations()` and set `currentTime` to
+0 / 85 / 170 / 255 / 340ms, reading `getComputedStyle` at each point. `currentTime`
+is a hold on the animation, so the computed value reflects the seek even while
+the document's own timeline is frozen. The measured blend (incoming / outgoing):
+
+```
+  0ms → 0.000 / 1.000
+ 85ms → 0.315 / 0.685
+170ms → 0.791 / 0.209
+255ms → 0.960 / 0.040
+340ms → 1.000 / 0.000
+```
+
+Monotonic, mid-blend at the halfway point (0.791, not 0 or 1), and settled at
+the end — that is the `cubic-bezier(0.33, 0, 0.2, 1)` curve. A live-frame
+sampling check is also in the harness and runs automatically whenever the
+document happens to be visible.
+
+### The mouse caveat was a real bug, not a harness artefact
+The first two harness runs failed because a real mouse pointer parked over the
+page kept re-aiming the mascot between synthetic touches. That looked like test
+noise — but the cause was in the product: `onPointerMove` had no `touching`
+guard, so **any** stray mouse move overwrote the in-flight touch point and yanked
+the gaze mid-drag. On a touch-screen laptop that is exactly the "touch dragging
+is unreliable" symptom.
+
+`onPointerMove` now returns early while a touch gesture is active, so the mouse
+cannot steal a drag in progress. Mouse steering is unchanged the rest of the
+time (a cursor present should steer) — the harness only blocks the *real* mouse
+between gestures and drives the mouse path explicitly with marked synthetic
+`PointerEvent`s, so the precedence rule is asserted rather than assumed.
+
+The harness (`__touch.html`, a root-level page that mounts `EnhancedMascot`
+directly against the preset `fox` sheets) was removed after use, as with the
+earlier phases. It needs a running `npx vite` dev server and can be rebuilt from
+the checks in the table above.
 
 `tsc` clean · 0 lint errors · build passes. No credits used.
 

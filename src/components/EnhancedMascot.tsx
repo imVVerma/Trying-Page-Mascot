@@ -343,9 +343,13 @@ export function EnhancedMascot({
       kickoff = window.setTimeout(startIdle, IDLE_DWELL_MS);
     };
 
-    // Mouse movement steers directly.
+    // Mouse movement steers directly — but only when no touch gesture is in
+    // flight. Without this guard a stray mouse move (a cursor parked over the
+    // page, or a hybrid laptop nudging the trackpad during a screen drag)
+    // overwrites the touch point mid-gesture and yanks the gaze away, which is
+    // what made touch dragging unreliable on touch-screen laptops.
     const onPointerMove = (event: PointerEvent) => {
-      if (event.pointerType === 'touch') return;
+      if (event.pointerType === 'touch' || touching) return;
       cancelCenterReturn();
       pointer = { x: event.clientX, y: event.clientY };
       aim();
