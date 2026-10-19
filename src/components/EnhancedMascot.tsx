@@ -48,6 +48,20 @@ const MIN_DEAD_ZONE = 48;
 
 const REACTION_DWELL_MS = 900;
 const SQUASH_MS = 420;
+/** How long each idle gaze direction is held on touch devices. */
+const IDLE_DWELL_MS = 1600;
+
+/**
+ * Torso lock.
+ *
+ * Gaze sheets frame each pose slightly differently, so the shoulders can shift a
+ * little between cells — which reads as the whole body twitching. A faint,
+ * bottom-anchored copy of a fixed reference cell is composited underneath to
+ * anchor the shoulders, so only the head appears to move.
+ */
+const TORSO_ANCHOR_CELL = 4; // the neutral, forward-facing cell
+const TORSO_FADE_START = 62;
+const TORSO_FADE_END = 88;
 
 const SQUASH_KEYFRAMES: Keyframe[] = [
   { transform: 'scale(1, 1)', easing: 'ease-in' },
@@ -142,13 +156,19 @@ export function EnhancedMascot({
     };
   }, [directions, reactions]);
 
-  // Cursor tracking: attached once, reads size from a ref.
+  // Gaze tracking.
+  //
+  // Desktop: the mascot follows the mouse anywhere on the page.
+  // Touch:   there is no hovering cursor, so a drag anywhere on the page steers
+  //          the gaze, and on release it eases back to centre. The mascot also
+  //          drifts on its own when untouched, so a phone user still sees it
+  //          animate rather than sit frozen.
   useEffect(() => {
-    const supportsHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
-    if (!supportsHover) return;
+    const canHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
 
     let sector = -1;
     let pointer: { x: number; y: number } | null = null;
+    let touching = false;
 
     const aim = () => {
       const node = containerRef.current;
@@ -160,6 +180,7 @@ export function EnhancedMascot({
 
       const dist = Math.hypot(dx, dy);
       const rawAngle = Math.atan2(dy, dx);
+      // Dead-zone scales with the mascot so the feel is the same at any size.
       const deadZone = Math.max(MIN_DEAD_ZONE, sizeRef.current * DEAD_ZONE_RATIO);
 
       if (dist < deadZone) {
@@ -177,17 +198,111 @@ export function EnhancedMascot({
       setDirection(CLOCKWISE[sector]);
     };
 
+    // Mouse movement steers directly.
     const onPointerMove = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') return;
       pointer = { x: event.clientX, y: event.clientY };
       aim();
     };
 
+    // Touch: dragging steers, lifting releases back to centre.
+    const onTouchStart = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return;
+      touching = true;
+      stopIdle();
+      pointer = { x: event.clientX, y: event.clientY };
+      aim();
+    };
+
+    const onTouchMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !touching) return;
+      pointer = { x: event.clientX, y: event.clientY };
+      aim();
+    };
+
+    const onTouchEnd = () => {
+      if (!touching) return;
+      touching = false;
+      pointer = null;
+      sector = -1;
+      setDirection('center');
+    };
+
+    // Legacy Touch Events, for browsers that fire touch rather than pointer
+    // events (older iOS Safari). Coordinates come from touches[0] and are mapped
+    // relative to the mascot, exactly like a mouse.
+    const readTouch = (event: TouchEvent) => {
+      const t = event.touches?.[0] ?? event.changedTouches?.[0];
+      if (!t) return;
+      pointer = { x: t.clientX, y: t.clientY };
+      aim();
+    };
+
+    const onTouchEventStart = (event: TouchEvent) => {
+      touching = true;
+      stopIdle();
+      readTouch(event);
+    };
+
+    const onTouchEventMove = (event: TouchEvent) => {
+      if (!touching) return;
+      readTouch(event);
+    };
+
+    const onTouchEventEnd = () => onTouchEnd();
+
     window.addEventListener('pointermove', onPointerMove, { passive: true });
+    window.addEventListener('pointerdown', onTouchStart, { passive: true });
+    window.addEventListener('pointermove', onTouchMove, { passive: true });
+    window.addEventListener('pointerup', onTouchEnd, { passive: true });
+    window.addEventListener('pointercancel', onTouchEnd, { passive: true });
+    window.addEventListener('touchstart', onTouchEventStart, { passive: true });
+    window.addEventListener('touchmove', onTouchEventMove, { passive: true });
+    window.addEventListener('touchend', onTouchEventEnd, { passive: true });
+    window.addEventListener('touchcancel', onTouchEventEnd, { passive: true });
     window.addEventListener('scroll', aim, { passive: true });
+
+    // On touch devices, sweep the gaze gently while idle so the mascot reads as
+    // alive without anyone interacting.
+    let idleTimer = 0;
+    const startIdle = () => {
+      if (canHover || touching) return;
+      stopIdle();
+      const step = () => {
+        if (touching) return;
+        const order: Direction[] = ['left', 'up-left', 'up', 'up-right', 'right', 'down-right', 'down', 'down-left'];
+        const next = order[(cycleRef.current + 1) % order.length];
+        cycleRef.current += 1;
+        setDirection(next);
+        idleTimer = window.setTimeout(step, IDLE_DWELL_MS);
+      };
+      idleTimer = window.setTimeout(step, IDLE_DWELL_MS);
+    };
+
+    function stopIdle() {
+      if (idleTimer) {
+        window.clearTimeout(idleTimer);
+        idleTimer = 0;
+      }
+    }
+
+    // Only sweep when genuinely idle, not while the page is loading.
+    const kickoff = window.setTimeout(startIdle, IDLE_DWELL_MS);
+    void kickoff;
 
     return () => {
       window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerdown', onTouchStart);
+      window.removeEventListener('pointermove', onTouchMove);
+      window.removeEventListener('pointerup', onTouchEnd);
+      window.removeEventListener('pointercancel', onTouchEnd);
+      window.removeEventListener('touchstart', onTouchEventStart);
+      window.removeEventListener('touchmove', onTouchEventMove);
+      window.removeEventListener('touchend', onTouchEventEnd);
+      window.removeEventListener('touchcancel', onTouchEventEnd);
       window.removeEventListener('scroll', aim);
+      window.clearTimeout(kickoff);
+      stopIdle();
     };
   }, []);
 
@@ -246,6 +361,12 @@ export function EnhancedMascot({
     appearance: 'none',
     cursor: isInteractive ? 'pointer' : 'default',
     userSelect: 'none',
+    WebkitUserSelect: 'none',
+    // Suppress iOS tap highlight and the long-press callout menu.
+    WebkitTapHighlightColor: 'transparent',
+    // manipulation removes the ~300ms double-tap-to-zoom delay without
+    // disabling pinch-zoom elsewhere on the page.
+    touchAction: 'manipulation',
     outline: 'none',
     opacity: ready ? 1 : 0.5,
     transition: 'opacity 0.2s ease',
@@ -278,6 +399,20 @@ export function EnhancedMascot({
             opacity: reaction ? 1 : 0,
           }}
         />
+        {/* Torso lock: a steady body behind the moving sprite, faded in wherever
+            the sheet's own body has been cropped away by the gaze framing. */}
+        <span
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backgroundImage: `url("${activeDirections}")`,
+            ...cellPosition(TORSO_ANCHOR_CELL),
+            opacity: reaction ? 0.12 : 0.16,
+            maskImage: `linear-gradient(to bottom, transparent ${TORSO_FADE_START}%, #000 ${TORSO_FADE_END}%)`,
+            WebkitMaskImage: `linear-gradient(to bottom, transparent ${TORSO_FADE_START}%, #000 ${TORSO_FADE_END}%)`,
+            transition: 'opacity 0.12s ease-in-out',
+          }}
+        />
       </span>
   );
 
@@ -300,6 +435,10 @@ export function EnhancedMascot({
       ref={containerRef as React.RefObject<HTMLButtonElement>}
       type="button"
       onClick={handleBoop}
+      // Stop iOS/Android turning a long press on the sprite into a text
+      // selection or the system callout menu.
+      onContextMenu={(e) => e.preventDefault()}
+      draggable={false}
       aria-label={`Tap ${label}`}
       className={`enhanced-mascot-btn ${className}`}
       style={shellProps}

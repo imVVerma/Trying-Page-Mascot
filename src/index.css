@@ -105,6 +105,9 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+  /* Suppress the translucent blue tap flash iOS/Safari paints on taps. */
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 input[type="range"] {

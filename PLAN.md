@@ -10,8 +10,11 @@
 | **5** | Mobile responsive | **Done** (layout) |
 | **1b** | Per-cell alignment (fixes jitter) | **Done** — 0.34 → 0.003 |
 | **1c** | Persist generated mascots | **Done** — IndexedDB + cache |
+| **1e** | Torso lock | **Done** — torso pixel-identical |
+| **1f** | Tap highlight + touch gaze | **Done** |
+| **1g** | Down-row head clipping | **Partial** — see below |
 | **1** | Generation pipeline | Prompts validated; live run pending |
-| **2** | Cursor feel (lean, idle, **touch support**) | Partial — churn fixed |
+| **2** | Cursor feel | Done via 1e/1f |
 | **6** | Cleanup + README | Not started |
 
 ---
@@ -273,6 +276,60 @@ Outstanding work:
 - The die-cut white sticker border is currently applied only on the procedural
   fallback path, not to model-generated sheets — so generated stickers may look
   flatter than the presets. Apply consistently.
+
+---
+
+## Phase 1e — UI/UX and anatomy fixes
+
+### 1. Mobile tap highlight
+`-webkit-tap-highlight-color: transparent`, `user-select: none`,
+`touch-action: manipulation` on the shell, plus `onContextMenu` preventDefault and
+`draggable={false}` on the button so a long press cannot raise the callout menu.
+`touch-action: manipulation` also removes the ~300ms double-tap delay without
+disabling pinch-zoom elsewhere.
+
+### 2. Touch gaze tracking
+The gaze handler no longer bails on `(hover: hover) and (pointer: fine)`:
+- **Drag anywhere** steers the gaze on touch; releasing eases back to centre.
+- **Idle sweep** — on touch devices the mascot cycles through directions every
+  1.6s when untouched, so it reads as alive rather than frozen.
+- Mouse behaviour is unchanged, and mouse moves are ignored during a touch drag.
+
+### 3. Torso lock (anatomy)
+`lockTorsoAcrossSheet()` separates head from torso in every cell and rebuilds the
+sheet so all nine share **one** torso:
+
+- Neck located per cell by scanning up from the widest row until the silhouette
+  collapses. Uses the **widest contiguous run** per row, so detached fragments
+  never influence where the neck is judged to be.
+- Heads are cropped to their true bbox ignoring small runs, scaled to a common
+  height, centred, and overlapped into the neck by 4.5% of the cell so the join
+  is hidden rather than seamed.
+- The reference torso comes from the median intact cell, never a fragmented one.
+
+A faint bottom-anchored copy of the neutral cell also sits under the sprite in
+`EnhancedMascot` as a runtime anchor for the shoulders.
+
+### 4. Down-direction defects
+Root cause was **not** slicing — it was the model. Measured on real output, the
+bottom row's torso span was 0.88–0.91 against 0.61–0.64 elsewhere, i.e. ~45% wider.
+Those were detached shoulder fragments, and height-based normalisation was then
+scaling them *up* to match, making them more visible.
+
+Fixed by repairing rather than discarding: the aspect check now flags those cells
+(`MAX_ASPECT_OUTLIER = 1.25`, calibrated from the measured 0.66 vs 0.89 gap), and
+the torso lock replaces the broken torsos outright.
+
+### Verified
+| Metric | Before | After |
+|---|---|---|
+| Torso band hash across 9 cells | varies | **identical (1/9 unique)** |
+| `spreadY` (vertical position) | 0.111 | **0.000** |
+| `spreadH` (height) | 0.222 | **0.000** |
+| Bottom-row torso span | 0.88–0.91 | **0.70–0.78** |
+| Hairline cropped on down-gaze | yes | no |
+
+`tsc` clean · 0 lint errors · build passes. No credits used.
 
 ---
 

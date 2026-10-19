@@ -88,7 +88,7 @@ async function resolveSheet(
           return { url: sheet.canvas.toDataURL('image/webp', 0.95), source: 'ai' };
         }
         console.warn(
-          `[mascot] ${kind} sheet had ${sheet.emptyCells.length} empty cell(s); using fallback`
+          `[mascot] ${kind} sheet rejected (${sheet.reason}); using procedural fallback`
         );
       } else {
         console.warn(`[mascot] ${kind} sheet was not magenta-backed; using fallback`);

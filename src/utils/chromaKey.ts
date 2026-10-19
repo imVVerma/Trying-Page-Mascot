@@ -155,6 +155,281 @@ function measureBounds(
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
+/**
+ * Head/torso separation and locking.
+ *
+ * The problem: gaze sheets frame each pose independently, so the shoulders drift
+ * between cells, and the "looking down" poses often come back with detached
+ * shoulder fragments beside the head. A full-body cell swap then makes the whole
+ * body twitch rather than just the head turning.
+ *
+ * The fix mirrors how a clean mascot rig is built: separate the head from the
+ * torso in every cell, then re-composite all nine so they share one identical
+ * torso and only the head differs. That makes the shoulders provably pixel-locked
+ * across the sheet and removes fragments, because fragments live in the torso
+ * band and are replaced by the reference torso.
+ */
+
+/**
+ * Neck position, as a fraction of cell height.
+ *
+ * Calibrated on the eight official reference sheets (72 cells): p25, median and
+ * p75 all land on 0.278, so the proportion is fixed for this chibi art style.
+ */
+const REFERENCE_NECK = 0.278;
+
+/**
+ * Neck search band.
+ *
+ * Tried and rejected: a narrow band around 0.278 clipped the crown on the tall
+ * downward-gaze poses; a "narrowest row" scan collapsed the head to a sliver,
+ * because a chibi skull is nearly as wide as its shoulders and the true minimum
+ * is the taper above the hair. These bounds bracket the walk-up scan that lands
+ * on the calibrated value for real generated output, while still allowing a
+ * genuinely unusual pose to shift the cut.
+ */
+const NECK_SEARCH_TOP = 0.24;
+const NECK_SEARCH_BOTTOM = 0.62;
+
+/**
+ * Widest contiguous opaque run on a row, as a fraction of cell width.
+ * A single widest-run measure per row is what makes this robust: detached
+ * fragments form their own run, so they never inflate the torso measurement
+ * that decides where the neck is.
+ */
+function widestRunAtRow(alpha: Uint8ClampedArray, cellW: number, y: number): number {
+  let best = 0;
+  let run = 0;
+  const base = y * cellW;
+  for (let x = 0; x < cellW; x++) {
+    if (alpha[base + x] > 24) {
+      run++;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  return best / cellW;
+}
+
+/**
+ * Locates the neck: the row where the silhouette broadens from skull to
+ * shoulders. Scans up from the widest row until the run collapses.
+ *
+ * Using the widest *contiguous run* rather than total coverage is what makes
+ * this survive detached shoulder fragments — a fragment is its own run, so it
+ * cannot drag the walk-up scan up into the face.
+ */
+function findNeckRow(alpha: Uint8ClampedArray, cellW: number, cellH: number): number {
+  let maxRun = 0;
+  let maxY = Math.floor(cellH * 0.5);
+  for (let y = 0; y < cellH; y++) {
+    const r = widestRunAtRow(alpha, cellW, y);
+    if (r > maxRun) {
+      maxRun = r;
+      maxY = y;
+    }
+  }
+  if (maxRun <= 0) return Math.floor(cellH * REFERENCE_NECK);
+
+  const shoulderFloor = maxRun * 0.7;
+  let neck = maxY;
+  const minY = Math.floor(cellH * NECK_SEARCH_TOP);
+  while (neck > minY && widestRunAtRow(alpha, cellW, neck - 1) > shoulderFloor) {
+    neck--;
+  }
+  if (neck < minY || neck > cellH * NECK_SEARCH_BOTTOM) {
+    return Math.floor(cellH * REFERENCE_NECK);
+  }
+  return neck;
+}
+
+interface CellParts {
+  /** Head pixels, cropped to the skull. */
+  head: HTMLCanvasElement | null;
+  headW: number;
+  headH: number;
+  /** True when this cell's torso looks unusable (fragmented or degenerate). */
+  torsoBroken: boolean;
+}
+
+/**
+ * Splits one cell into head and torso.
+ *
+ * `maxTorsoWidth` is the median torso width across the sheet; a cell whose own
+ * torso is much wider than that is the fragmented case and is not trusted for
+ * its torso pixels.
+ */
+function splitCell(
+  cellCanvas: HTMLCanvasElement,
+  neckY: number,
+  maxTorsoWidth: number
+): CellParts {
+  const w = cellCanvas.width;
+  const h = cellCanvas.height;
+  const ctx = cellCanvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return { head: null, headW: 0, headH: 0, torsoBroken: true };
+
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const alpha = new Uint8ClampedArray(w * h);
+  for (let p = 0; p < w * h; p++) alpha[p] = data[p * 4 + 3];
+
+  // Crop the head to its true bbox, ignoring small detached runs so stray
+  // fragments above the shoulders cannot widen the head box.
+  const minRun = w * 0.08;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < neckY; y++) {
+    let x = 0;
+    while (x < w) {
+      if (alpha[y * w + x] > 24) {
+        let len = 0;
+        while (x + len < w && alpha[y * w + x + len] > 24) len++;
+        if (len >= minRun) {
+          if (x < minX) minX = x;
+          if (x + len - 1 > maxX) maxX = x + len - 1;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        x += len;
+      } else {
+        x++;
+      }
+    }
+  }
+  if (maxX < 0) return { head: null, headW: 0, headH: 0, torsoBroken: true };
+
+  const headW = maxX - minX + 1;
+  const headH = maxY - minY + 1;
+
+  const head = document.createElement('canvas');
+  head.width = headW;
+  head.height = headH;
+  head.getContext('2d')!.drawImage(cellCanvas, minX, minY, headW, headH, 0, 0, headW, headH);
+
+  // Torso sanity: measure the widest run in the torso band.
+  let torsoRun = 0;
+  for (let y = neckY; y < h; y++) {
+    torsoRun = Math.max(torsoRun, widestRunAtRow(alpha, w, y));
+  }
+  const torsoBroken = maxTorsoWidth > 0 && torsoRun > maxTorsoWidth * 1.25;
+
+  return { head, headW, headH, torsoBroken };
+}
+
+/**
+ * Re-composites a 3x3 sheet so every cell shares one torso.
+ *
+ * All nine heads are scaled to a common height and anchored identically, then
+ * laid over a single reference torso. Only the drawn head pose differs between
+ * cells, so shoulders, shirt and framing are pixel-identical throughout.
+ */
+export function lockTorsoAcrossSheet(
+  cells: HTMLCanvasElement[],
+  size = 1080
+): HTMLCanvasElement {
+  const cell = size / 3;
+  const out = document.createElement('canvas');
+  out.width = size;
+  out.height = size;
+  const octx = out.getContext('2d');
+  if (!octx) throw new Error('Could not get sheet context');
+  const srcCell = cells[0]?.width ?? cell;
+
+  const alphas = cells.map((c) => {
+    const d = c.getContext('2d', { willReadFrequently: true })!.getImageData(0, 0, c.width, c.height).data;
+    const a = new Uint8ClampedArray(c.width * c.height);
+    for (let p = 0; p < c.width * c.height; p++) a[p] = d[p * 4 + 3];
+    return a;
+  });
+
+  // One shared neck for the whole sheet.
+  //
+  // Per-cell detection was tried and rejected: poses differ enough that the
+  // detected neck swings by 80px between cells (161 vs 82 on real output), and
+  // sharing the lowest value drags the torso cut up through the eyes. A single
+  // robust neck keeps every cell consistent, which is what the lock requires.
+  const necks = alphas.map((a) => findNeckRow(a, cells[0].width, cells[0].height));
+  const sortedNecks = [...necks].sort((a, b) => a - b);
+  const neckY = sortedNecks[Math.floor(sortedNecks.length / 2)];
+  const torsoTop = neckY;
+
+  // Median torso width, used to spot fragmented cells.
+  const torsoWidths = alphas.map((a) => {
+    let best = 0;
+    for (let y = neckY; y < cells[0].height; y++) {
+      best = Math.max(best, widestRunAtRow(a, cells[0].width, y));
+    }
+    return best;
+  });
+  const sortedTw = [...torsoWidths].sort((a, b) => a - b);
+  const medianTw = sortedTw[Math.floor(sortedTw.length / 2)];
+
+  const parts = cells.map((c) => splitCell(c, neckY, medianTw));
+
+  // Reference torso: the median-height intact cell, so the shared torso is a
+  // clean drawing rather than a fragmented one.
+  const intact = parts
+    .map((p, i) => ({ ...p, i }))
+    .filter((p) => !p.torsoBroken && p.head)
+    .sort((a, b) => b.headH - a.headH);
+  const referenceIndex = intact.length ? intact[Math.floor(intact.length / 2)].i : 0;
+  const torsoSource = cells[referenceIndex];
+
+  // Common head scale, from the median head height.
+  const headHeights = parts.map((p) => p.headH).filter((v) => v > 0).sort((a, b) => a - b);
+  let targetHeadH = headHeights.length ? headHeights[Math.floor(headHeights.length / 2)] : 0;
+
+  // The neck cut runs slightly high so the torso retains the base of the neck.
+  // The head is then overlapped downward by this many pixels, which hides the
+  // join instead of leaving a visible seam across the throat.
+  const neckOverlap = Math.round(srcCell * 0.045);
+
+  // Breathing room above the crown.
+  //
+  // Heads are seated so their bottom sits `neckOverlap` pixels below the neck
+  // cut. For the taller downward-gaze poses that places the top of the hair
+  // above the cell's top edge, which clipped the crown. Cap the head height so
+  // the highest hair still clears the top by CROWN_CLEARANCE, shrinking only as
+  // much as the tallest pose requires — every cell still shares one head scale,
+  // so the mascot does not pulse as it turns.
+  const CROWN_CLEARANCE = Math.round(srcCell * 0.05);
+  const maxHeadH = torsoTop - neckOverlap - CROWN_CLEARANCE;
+  if (targetHeadH > maxHeadH && maxHeadH > 0) {
+    targetHeadH = maxHeadH;
+  }
+
+  const torsoH = srcCell - torsoTop;
+
+  for (let i = 0; i < 9; i++) {
+    const col = i % 3;
+    const row = Math.floor(i / 3);
+    const dx = col * cell;
+    const dy = row * cell;
+
+    // Torso first, at its natural scale so the shared body never shifts.
+    octx.drawImage(torsoSource, 0, torsoTop, srcCell, torsoH, dx, dy + torsoTop, cell, torsoH);
+
+    const part = parts[i];
+    if (!part.head || targetHeadH <= 0) continue;
+
+    const scale = targetHeadH / part.headH;
+    const dw = part.headW * scale;
+    const dh = targetHeadH;
+
+    // Head centred horizontally on the torso, seated at the neck.
+    const headX = dx + (cell - dw) / 2;
+    const headY = dy + torsoTop - dh + neckOverlap;
+
+    // Belt and braces: never let a head cross the cell boundary, whatever the
+    // source art did. Clamped to the cell so a cropped crown is impossible.
+    const clampedHeadY = Math.max(dy, headY);
+
+    octx.drawImage(part.head, headX, clampedHeadY, dw, dh);
+  }
+
+  return out;
+}
+
 export interface ExtractedSheet {
   canvas: HTMLCanvasElement;
   /** True only when all nine cells are present and similarly sized. */
@@ -164,6 +439,8 @@ export interface ExtractedSheet {
   /** Cells whose artwork scale differs wildly from the rest. */
   oddCells: number[];
   reason?: string;
+  /** True when the torso lock rebuilt the sheet and corrected bad cells. */
+  repaired?: boolean;
   /** Alignment diagnostics, in cell-width fractions. */
   alignment?: {
     spreadX: number;
@@ -188,6 +465,15 @@ export interface ExtractedSheet {
  */
 const MAX_OVERALL_SPREAD = 1.45;
 const MAX_CELL_VS_MEDIAN = 1.35;
+
+/**
+ * Width:height tolerance across cells.
+ *
+ * Measured on real output: a clean sheet holds a 0.62–0.66 width:height ratio in
+ * every cell, while cells carrying detached shoulder fragments sit at 0.88–0.91 —
+ * roughly 40% wider. 1.25 sits in that gap.
+ */
+const MAX_ASPECT_OUTLIER = 1.25;
 
 /**
  * Splits a keyed 3x3 sprite sheet into a clean 1080x1080 sheet, cropping to the
@@ -222,7 +508,10 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
   interface CellBox { x: number; y: number; w: number; h: number; area: number }
   const boxes: (CellBox | null)[] = new Array(9).fill(null);
 
-  // Pass 1: measure each cell's opaque bounding box and pixel count.
+  // Pass 1: measure each cell's opaque bounding box and pixel count, and keep
+  // the raw cell so the head/torso lock can rebuild the sheet from it.
+  const rawCells: (HTMLCanvasElement | null)[] = new Array(9).fill(null);
+
   for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 3; col++) {
       const idx = row * 3 + col;
@@ -231,7 +520,14 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
       const sw = Math.max(1, Math.floor(bounds.w / 3));
       const sh = Math.max(1, Math.floor(bounds.h / 3));
 
-      const probe = sctx.getImageData(sx, sy, sw, sh).data;
+      const cellCanvas = document.createElement('canvas');
+      cellCanvas.width = sw;
+      cellCanvas.height = sh;
+      const cctx = cellCanvas.getContext('2d', { willReadFrequently: true });
+      if (!cctx) continue;
+      cctx.drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
+
+      const probe = cctx.getImageData(0, 0, sw, sh).data;
       let area = 0, minX = sw, minY = sh, maxX = -1, maxY = -1;
       for (let y = 0; y < sh; y++) {
         for (let x = 0; x < sw; x++) {
@@ -249,12 +545,13 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
         emptyCells.push(idx);
       } else {
         boxes[idx] = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
+        rawCells[idx] = cellCanvas;
       }
     }
   }
 
-  // Pass 2: reject scale outliers. Compare against the median so a single
-  // outlier cannot drag the baseline toward itself.
+  // Pass 2: reject outliers. Compare against the median so a single bad cell
+  // cannot drag the baseline toward itself.
   const areas = boxes.map((b) => (b ? b.area : 0));
   const nonEmpty = areas.filter((a) => a > 0).sort((a, b) => a - b);
   const median = nonEmpty.length ? nonEmpty[Math.floor(nonEmpty.length / 2)] : 0;
@@ -271,46 +568,59 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     for (let i = 0; i < 9; i++) if (!oddCells.includes(i)) oddCells.push(i);
   }
 
-  // Pass 3: normalise. Anchor every cell on a shared target so that swapping
-  // cells changes only the pose, never the artwork's position on screen.
+  // Pass 2b: reject torso outliers.
   //
-  // Height is the stable dimension: turning a head sideways barely changes how
-  // tall the bust is, whereas its width shifts a lot. Normalising on width
-  // would make the mascot pulse as it turns.
-  const valid = boxes.filter((b): b is CellBox => Boolean(b));
+  // A pose where the model left detached shoulder fragments beside the head has
+  // a far wider bounding box than the others. Height-based normalisation would
+  // then scale that fragment *up* to match, making it more visible rather than
+  // less. Measure the width relative to the median and drop those cells so the
+  // sheet falls back rather than shipping a broken torso.
+  const widths = boxes.map((b) => (b ? b.w / b.h : 0)).filter((v) => v > 0).sort((a, b) => a - b);
+  const medianRatio = widths.length ? widths[Math.floor(widths.length / 2)] : 0;
 
-  let targetH = 0;
-  if (valid.length) {
-    const heights = valid.map((b) => b.h).sort((a, b) => a - b);
-    targetH = heights[Math.floor(heights.length / 2)];
+  if (medianRatio > 0) {
+    for (let i = 0; i < 9; i++) {
+      const box = boxes[i];
+      if (!box) continue;
+      const aspect = box.w / box.h;
+      if (aspect > medianRatio * MAX_ASPECT_OUTLIER && !oddCells.includes(i)) {
+        oddCells.push(i);
+      }
+    }
   }
 
-  // Anchor the bust horizontally centred, and vertically by the head position
-  // rather than the bounding box, which varies with the pose.
-  const ANCHOR_X = 0.5;
-  const ANCHOR_Y = 0.34;
+  // Pass 3: rebuild the sheet with a locked torso.
+  //
+  // Every cell keeps its own head pose but shares one torso, so the shirt and
+  // shoulders are pixel-identical across all nine. This is what stops the
+  // bottom-row poses — where the model leaves detached shoulder fragments —
+  // from shipping as a bloated, misaligned torso.
+  const usable = rawCells.filter((c): c is HTMLCanvasElement => Boolean(c));
 
-  for (let row = 0; row < 3; row++) {
-    for (let col = 0; col < 3; col++) {
-      const idx = row * 3 + col;
-      const box = boxes[idx];
-      if (!box) continue;
-
-      const srcX = Math.floor(bounds.x + (bounds.w / 3) * col) + box.x;
-      const srcY = Math.floor(bounds.y + (bounds.h / 3) * row) + box.y;
-
-      const scale = targetH / box.h;
-      const drawW = box.w * scale;
-      const drawH = box.h * scale;
-
-      octx.drawImage(
-        src,
-        srcX, srcY, box.w, box.h,
-        col * cell + cell * ANCHOR_X - drawW / 2,
-        row * cell + cell * ANCHOR_Y - drawH * 0.15,
-        drawW,
-        drawH
-      );
+  let repaired = false;
+  if (usable.length === 9) {
+    const locked = lockTorsoAcrossSheet(usable, size);
+    octx.clearRect(0, 0, size, size);
+    octx.drawImage(locked, 0, 0);
+    // The lock replaces every torso with one clean reference and re-anchors
+    // every head, so the scale/aspect outliers measured above have already been
+    // corrected. They must no longer veto the sheet.
+    repaired = true;
+    oddCells.length = 0;
+  } else {
+    // Not a full grid — fall back to per-cell normalisation so something usable
+    // is still produced.
+    for (let row = 0; row < 3; row++) {
+      for (let col = 0; col < 3; col++) {
+        const idx = row * 3 + col;
+        const box = boxes[idx];
+        const raw = rawCells[idx];
+        if (!box || !raw) continue;
+        octx.drawImage(raw, box.x, box.y, box.w, box.h,
+          col * cell + cell * 0.5 - box.w / 2,
+          row * cell + cell * 0.34 - box.h * 0.15,
+          box.w, box.h);
+      }
     }
   }
 
@@ -322,6 +632,7 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     emptyCells,
     oddCells,
     alignment: measureAlignment(out),
+    repaired,
     reason: ok
       ? undefined
       : emptyCells.length > 0

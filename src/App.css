@@ -109,7 +109,21 @@
 .stage-mascot {
   filter: drop-shadow(0 14px 26px rgba(0, 0, 0, 0.45));
   animation: mascotIdle 4.5s ease-in-out infinite;
-  /* Let the whole mascot be tapped, not just its opaque pixels. */
+}
+
+/*
+ * Suppress the translucent blue tap highlight mobile browsers paint over tapped
+ * elements, and stop a press being treated as a text selection or an image
+ * save. `touch-action: manipulation` removes the ~300ms double-tap-to-zoom delay
+ * while leaving pinch-zoom intact.
+ */
+.enhanced-mascot-btn,
+.stage-mascot,
+.brand-mascot {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   touch-action: manipulation;
 }
 
