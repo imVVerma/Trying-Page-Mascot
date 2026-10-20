@@ -152,7 +152,15 @@ function measureBounds(
     }
   }
   if (maxX < 0) return null;
-  return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+  // Add 5% padding on all sides so the top of the head/hair and the edges
+  // of the character are never clipped by the cell boundary.
+  const padX = Math.round((maxX - minX + 1) * 0.05);
+  const padY = Math.round((maxY - minY + 1) * 0.05);
+  const x = Math.max(0, minX - padX);
+  const y = Math.max(0, minY - padY);
+  const bw = Math.min(w - x, maxX - minX + 1 + padX * 2);
+  const bh = Math.min(h - y, maxY - minY + 1 + padY * 2);
+  return { x, y, w: bw, h: bh };
 }
 
 /**
@@ -434,12 +442,16 @@ export function lockTorsoAcrossSheet(
     const dh = targetHeadH;
 
     // Head centred horizontally on the torso, seated at the neck.
+    // A small upward offset gives the crown breathing room so the top of the
+    // hair is never clipped by the cell boundary.
+    const HEAD_Y_OFFSET = -4;
     const headX = dx + (cell - dw) / 2;
-    const headY = dy + torsoTop - dh + neckOverlap;
+    const headY = dy + torsoTop - dh + neckOverlap + HEAD_Y_OFFSET;
 
     // Belt and braces: never let a head cross the cell boundary, whatever the
-    // source art did. Clamped to the cell so a cropped crown is impossible.
-    const clampedHeadY = Math.max(dy, headY);
+    // source art did. Clamped with 2px of top padding so a cropped crown is
+    // impossible even on the tallest poses.
+    const clampedHeadY = Math.max(dy + 2, headY);
 
     octx.drawImage(part.head, headX, clampedHeadY, dw, dh);
   }

@@ -490,7 +490,10 @@ export function EnhancedMascot({
     touchAction: 'manipulation',
     outline: 'none',
     opacity: ready ? 1 : 0.5,
-    transition: 'opacity 0.2s ease',
+    // Smooth the gaze transitions so the head glides between direction frames
+    // instead of snapping. The opacity crossfade (DIRECTION_CROSSFADE_MS) already
+    // dissolves between poses; this adds a subtle transform settle on top.
+    transition: 'transform 0.2s ease-out, opacity 0.3s ease',
   };
 
   const mascot = (
