@@ -521,6 +521,9 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
   const cell = size / 3;
   const emptyCells: number[] = [];
   const oddCells: number[] = [];
+  // Hard failures: problems the torso lock cannot fix (too much fill, multiple
+  // overlapping characters). These are never cleared by Pass 3.
+  const hardFailures: number[] = [];
 
   interface CellBox { x: number; y: number; w: number; h: number; area: number }
   const boxes: (CellBox | null)[] = new Array(9).fill(null);
@@ -560,7 +563,45 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
 
       if (area / (sw * sh) < 0.03) {
         emptyCells.push(idx);
+      } else if (area / (sw * sh) > 0.5) {
+        // A single cell should never be more than half filled — that means the
+        // model drew one large character instead of a small portrait.
+        hardFailures.push(idx);
+        boxes[idx] = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
+        rawCells[idx] = cellCanvas;
       } else {
+        // Count connected components. A proper cell has one character (1-3 blobs
+        // allowing for detached hands/accessories). More than 4 means overlapping
+        // or multiple characters — reject.
+        let components = 0;
+        const visited = new Uint8Array(sw * sh);
+        for (let y = 0; y < sh; y++) {
+          for (let x = 0; x < sw; x++) {
+            if (probe[(y * sw + x) * 4 + 3] <= 24 || visited[y * sw + x]) continue;
+            components++;
+            if (components > 4) break;
+            // Flood fill
+            const stack: number[] = [y * sw + x];
+            visited[y * sw + x] = 1;
+            while (stack.length) {
+              const pos = stack.pop()!;
+              const px = pos % sw;
+              const py = (pos - px) / sw;
+              for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+                const nx = px + dx, ny = py + dy;
+                if (nx < 0 || nx >= sw || ny < 0 || ny >= sh) continue;
+                const ni = ny * sw + nx;
+                if (visited[ni] || probe[ni * 4 + 3] <= 24) continue;
+                visited[ni] = 1;
+                stack.push(ni);
+              }
+            }
+          }
+          if (components > 4) break;
+        }
+        if (components > 4) {
+          hardFailures.push(idx);
+        }
         boxes[idx] = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
         rawCells[idx] = cellCanvas;
       }
@@ -624,6 +665,9 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     // corrected. They must no longer veto the sheet.
     repaired = true;
     oddCells.length = 0;
+    // Hard failures (too much fill, overlapping characters) are NOT cleared —
+    // the torso lock cannot fix a cell that contains multiple characters or
+    // a character that fills most of the cell.
   } else {
     // Not a full grid — fall back to per-cell normalisation so something usable
     // is still produced.
@@ -641,7 +685,10 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     }
   }
 
-  const ok = emptyCells.length === 0 && oddCells.length === 0;
+  const ok =
+    emptyCells.length === 0 &&
+    oddCells.length === 0 &&
+    hardFailures.length === 0;
 
   return {
     canvas: out,
@@ -654,7 +701,9 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
       ? undefined
       : emptyCells.length > 0
         ? `${emptyCells.length} empty cell(s)`
-        : `uneven grid (spread ${spread.toFixed(2)}); cells ${oddCells.join(', ')}`,
+        : hardFailures.length > 0
+          ? `bad cell quality (cells ${hardFailures.join(', ')}): too large or overlapping characters`
+          : `uneven grid (spread ${spread.toFixed(2)}); cells ${oddCells.join(', ')}`,
   };
 }
 

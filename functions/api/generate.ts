@@ -79,18 +79,21 @@ const BUST_PROMPT =
 const DIRECTIONS_PROMPT =
   'Using the reference character, draw a sprite sheet containing NINE separate small portraits ' +
   'arranged in a strict 3x3 grid.\n\n' +
-  'SIZE AND SPACING RULES — these matter more than anything else:\n' +
-  '- Each portrait is SMALL. The character fills only the middle third of its own cell.\n' +
-  '- Every character has wide, empty magenta background on ALL FOUR sides of it: above the hair, ' +
-  'below the shoulders, to the left and to the right.\n' +
-  '- No character touches, overlaps or crosses a cell boundary. Each one is fully enclosed ' +
-  'inside its own cell.\n' +
-  '- All nine characters are exactly the same size as one another. No character is larger than ' +
-  'the others.\n' +
-  '- There is NO large portrait, NO close-up and NO hero image anywhere in the picture. Every face ' +
-  'is small and equal-sized.\n' +
-  '- There are NO lines, frames, borders, divider lines, separators, boxes or grid lines anywhere. ' +
-  'Cells are separated only by plain empty background.\n\n' +
+  'CRITICAL SIZE RULES — READ CAREFULLY, THESE ARE THE MOST IMPORTANT INSTRUCTIONS:\n' +
+  '- Each portrait is TINY. The character must fill NO MORE THAN ONE THIRD of its cell. ' +
+  'Imagine a 3x3 grid of tiny stickers on a big magenta canvas.\n' +
+  '- The character\'s head (including hair) must be no taller than ONE QUARTER of the cell height.\n' +
+  '- There must be WIDE EMPTY MAGENTA SPACE on ALL FOUR SIDES of every character: above the hair, ' +
+  'below the shoulders, to the left and to the right. At least one third of the cell must be empty ' +
+  'background on every side.\n' +
+  '- NO character may touch, overlap or cross a cell boundary. Each one is FULLY ENCLOSED inside ' +
+  'its own cell with generous empty space around it.\n' +
+  '- All nine characters are EXACTLY the same size. No character is larger than the others.\n' +
+  '- There is NO large portrait, NO close-up, NO hero image anywhere. Every face is tiny and equal.\n' +
+  '- There are NO lines, frames, borders, divider lines, separators, boxes or grid lines. ' +
+  'Cells are separated only by plain empty magenta background.\n' +
+  '- DO NOT draw one big character spanning multiple cells. Each cell contains ONE small, ' +
+  'self-contained portrait.\n\n' +
   'CELL CONTENTS, in order:\n' +
   'Row 1, left cell: head turned up and to the left. Row 1, middle cell: head tilted straight up. ' +
   'Row 1, right cell: head turned up and to the right.\n' +
@@ -150,7 +153,11 @@ const corsHeaders: Record<string, string> = {
 
 function sanitizeKey(val: unknown): string {
   if (!val || typeof val !== 'string') return '';
-  return val.trim().replace(/[\r\n\t]/g, '').replace(/[^\x20-\x7E]/g, '');
+  let clean = val.trim().replace(/[\r\n\t]/g, '').replace(/[^\x20-\x7E]/g, '');
+  if (/^[0-9a-f]{64}$/i.test(clean)) {
+    clean = `sk-live-${clean}`;
+  }
+  return clean;
 }
 
 function json(body: unknown, status = 200): Response {

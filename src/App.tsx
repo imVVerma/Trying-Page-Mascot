@@ -214,17 +214,41 @@ export default function App() {
     try {
       setGenerationStatus('Drawing your mascot…');
       const photo = await photoForUpload(uploadedFile);
-      const assets = await generateMascot(photo);
 
-      setGenerationStatus('Building your sticker pack…');
-      const built = await buildMascotAssets({
-        bust: assets.bust,
-        directions: assets.directions,
-        reactions: assets.reactions,
-      });
+      // The model sometimes produces a sheet where characters overlap or fill
+      // too much of a cell, which the validator rejects and falls back to the
+      // procedural rig. Retry once with a fresh generation before giving up —
+      // the prompt is non-deterministic, so a second roll often lands clean.
+      const MAX_ATTEMPTS = 2;
+      let built: Awaited<ReturnType<typeof buildMascotAssets>> | null = null;
+      let fellBack = 0;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        if (attempt > 0) {
+          setGenerationStatus('Retrying with a fresh layout…');
+        }
+        const assets = await generateMascot(photo);
+
+        setGenerationStatus('Building your sticker pack…');
+        const candidate = await buildMascotAssets({
+          bust: assets.bust,
+          directions: assets.directions,
+          reactions: assets.reactions,
+        });
+
+        fellBack = Object.values(candidate.source).filter((s) => s === 'procedural').length;
+        if (fellBack === 0) {
+          built = candidate;
+          break;
+        }
+        built = candidate; // keep last attempt's result
+        if (attempt < MAX_ATTEMPTS - 1) {
+          console.warn(`Attempt ${attempt + 1} fell back to procedural; retrying`);
+        }
+      }
+
+      if (!built) throw new Error('Could not build mascot assets.');
 
       // Be honest when a sheet had to fall back to the procedural rig.
-      const fellBack = Object.values(built.source).filter((s) => s === 'procedural').length;
       if (fellBack > 0) {
         setGenerationError(
           fellBack === 2
