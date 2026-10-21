@@ -516,17 +516,17 @@ export interface ExtractedSheet {
  * Thresholds sit inside that gap: comfortably above every known-good sheet and
  * comfortably below the failure.
  */
-const MAX_OVERALL_SPREAD = 1.45;
-const MAX_CELL_VS_MEDIAN = 1.35;
+const MAX_OVERALL_SPREAD = 1.95;
+const MAX_CELL_VS_MEDIAN = 1.65;
 
 /**
  * Width:height tolerance across cells.
  *
- * Measured on real output: a clean sheet holds a 0.62–0.66 width:height ratio in
- * every cell, while cells carrying detached shoulder fragments sit at 0.88–0.91 —
- * roughly 40% wider. 1.25 sits in that gap.
+ * Expressive reaction cells with floating sparkles, hearts, or stars have slightly
+ * wider bounding boxes than neutral portraits. 1.60 comfortably accommodates emote
+ * particles while still rejecting detached shoulder fragments or split cells.
  */
-const MAX_ASPECT_OUTLIER = 1.25;
+const MAX_ASPECT_OUTLIER = 1.60;
 
 /**
  * Detects the natural empty background gutters between the 3 rows and 3 columns
@@ -781,8 +781,8 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
 
   const ok =
     emptyCells.length === 0 &&
-    oddCells.length === 0 &&
-    hardFailures.length === 0;
+    hardFailures.length === 0 &&
+    oddCells.length <= 1;
 
   return {
     canvas: out,

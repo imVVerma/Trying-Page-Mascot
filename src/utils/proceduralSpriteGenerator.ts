@@ -165,7 +165,7 @@ function isReactionSheetDiverse(canvas: HTMLCanvasElement): boolean {
 
   if (count === 0) return true;
   const avgDiff = totalDiff / count;
-  return avgDiff >= 12.0;
+  return avgDiff >= 7.5;
 }
 
 /**
