@@ -105,12 +105,36 @@ export function keyOutChroma(
   // Feather: soften the remaining edge pixels so the die-cut border isn't jagged.
   featherEdges(d, w, h);
 
+  // Suppress magenta spill on anti-aliased and translucent edge pixels (e.g. clear glasses)
+  suppressChromaSpill(d, w, h);
+
   ctx.putImageData(imageData, 0, 0);
 
   const bounds = measureBounds(d, w, h);
   if (!bounds) return null;
 
   return { canvas: work, bounds };
+}
+
+/**
+ * Neutralizes magenta background color spill on semi-transparent edges and
+ * translucent elements (like clear glasses frames and hair strands).
+ */
+function suppressChromaSpill(d: Uint8ClampedArray, w: number, h: number) {
+  for (let i = 0; i < w * h * 4; i += 4) {
+    const a = d[i + 3];
+    if (a <= 20) continue;
+    const r = d[i];
+    const g = d[i + 1];
+    const b = d[i + 2];
+    const minRB = Math.min(r, b);
+    // Magenta spill signature: red and blue are both significantly higher than green
+    if (minRB > g + 40 && minRB > 110) {
+      const excess = minRB - g;
+      d[i] = Math.max(0, r - Math.round(excess * 0.75));
+      d[i + 2] = Math.max(0, b - Math.round(excess * 0.75));
+    }
+  }
 }
 
 /** Blurs alpha across the silhouette boundary by one pixel. */
@@ -505,6 +529,70 @@ const MAX_CELL_VS_MEDIAN = 1.35;
 const MAX_ASPECT_OUTLIER = 1.25;
 
 /**
+ * Detects the natural empty background gutters between the 3 rows and 3 columns
+ * by finding opacity valleys around 1/3 and 2/3.
+ *
+ * This prevents horizontal crown shearing: dividing blindly at exact thirds
+ * slices through the hair if rows drift by even a few pixels.
+ */
+function findGridSplitPoints(
+  d: Uint8ClampedArray,
+  w: number,
+  bounds: { x: number; y: number; w: number; h: number }
+): { xs: number[]; ys: number[] } {
+  const rowCounts = new Int32Array(bounds.h);
+  for (let dy = 0; dy < bounds.h; dy++) {
+    const y = bounds.y + dy;
+    let count = 0;
+    for (let dx = 0; dx < bounds.w; dx++) {
+      const x = bounds.x + dx;
+      if (d[(y * w + x) * 4 + 3] > 24) count++;
+    }
+    rowCounts[dy] = count;
+  }
+
+  const colCounts = new Int32Array(bounds.w);
+  for (let dx = 0; dx < bounds.w; dx++) {
+    const x = bounds.x + dx;
+    let count = 0;
+    for (let dy = 0; dy < bounds.h; dy++) {
+      const y = bounds.y + dy;
+      if (d[(y * w + x) * 4 + 3] > 24) count++;
+    }
+    colCounts[dx] = count;
+  }
+
+  const findValley = (counts: Int32Array, targetFrac: number, winFrac: number) => {
+    const target = Math.round(counts.length * targetFrac);
+    const win = Math.round(counts.length * winFrac);
+    const start = Math.max(0, target - win);
+    const end = Math.min(counts.length - 1, target + win);
+    let bestScore = Infinity;
+    let bestIdx = target;
+    for (let i = start; i <= end; i++) {
+      // Prioritize low count, and break ties by choosing index closest to target
+      const score = counts[i] * 10 + Math.abs(i - target);
+      if (score < bestScore) {
+        bestScore = score;
+        bestIdx = i;
+      }
+    }
+    return bestIdx;
+  };
+
+  const y1 = bounds.y + findValley(rowCounts, 1 / 3, 0.08);
+  const y2 = bounds.y + findValley(rowCounts, 2 / 3, 0.08);
+
+  const x1 = bounds.x + findValley(colCounts, 1 / 3, 0.08);
+  const x2 = bounds.x + findValley(colCounts, 2 / 3, 0.08);
+
+  return {
+    xs: [bounds.x, x1, x2, bounds.x + bounds.w],
+    ys: [bounds.y, y1, y2, bounds.y + bounds.h],
+  };
+}
+
+/**
  * Splits a keyed 3x3 sprite sheet into a clean 1080x1080 sheet, cropping to the
  * artwork's measured bounds so stray margins do not throw off the thirds.
  *
@@ -544,13 +632,16 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
   // the raw cell so the head/torso lock can rebuild the sheet from it.
   const rawCells: (HTMLCanvasElement | null)[] = new Array(9).fill(null);
 
+  const fullData = sctx.getImageData(0, 0, src.width, src.height).data;
+  const splits = findGridSplitPoints(fullData, src.width, bounds);
+
   for (let row = 0; row < 3; row++) {
     for (let col = 0; col < 3; col++) {
       const idx = row * 3 + col;
-      const sx = Math.floor(bounds.x + (bounds.w / 3) * col);
-      const sy = Math.floor(bounds.y + (bounds.h / 3) * row);
-      const sw = Math.max(1, Math.floor(bounds.w / 3));
-      const sh = Math.max(1, Math.floor(bounds.h / 3));
+      const sx = splits.xs[col];
+      const sy = splits.ys[row];
+      const sw = Math.max(1, splits.xs[col + 1] - splits.xs[col]);
+      const sh = Math.max(1, splits.ys[row + 1] - splits.ys[row]);
 
       const cellCanvas = document.createElement('canvas');
       cellCanvas.width = sw;
@@ -575,28 +666,27 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
 
       if (area / (sw * sh) < 0.03) {
         emptyCells.push(idx);
-      } else if (area / (sw * sh) > 0.5) {
-        // A single cell should never be more than half filled — that means the
-        // model drew one large character instead of a small portrait.
+      } else if (area / (sw * sh) > 0.85) {
+        // A single cell filling > 85% means an oversized hero image rather than a small portrait.
         hardFailures.push(idx);
         boxes[idx] = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
         rawCells[idx] = cellCanvas;
       } else {
-        // Count connected components. A proper cell has one character (1-3 blobs
-        // allowing for detached hands/accessories). More than 4 means overlapping
-        // or multiple characters — reject.
-        let components = 0;
+        // Count major connected components (> 8% of cell area). A single character has 1 major body.
+        // Multiple major bodies (> 1) indicate genuine overlapping or duplicate characters.
+        // Small detached emote particles (sparkles, tears, hearts, blush lines, sweat drops)
+        // are allowed and do not trigger false rejections.
+        let majorComponents = 0;
         const visited = new Uint8Array(sw * sh);
         for (let y = 0; y < sh; y++) {
           for (let x = 0; x < sw; x++) {
             if (probe[(y * sw + x) * 4 + 3] <= 24 || visited[y * sw + x]) continue;
-            components++;
-            if (components > 4) break;
-            // Flood fill
+            let blobArea = 0;
             const stack: number[] = [y * sw + x];
             visited[y * sw + x] = 1;
             while (stack.length) {
               const pos = stack.pop()!;
+              blobArea++;
               const px = pos % sw;
               const py = (pos - px) / sw;
               for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
@@ -608,10 +698,12 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
                 stack.push(ni);
               }
             }
+            if (blobArea > sw * sh * 0.08) {
+              majorComponents++;
+            }
           }
-          if (components > 4) break;
         }
-        if (components > 4) {
+        if (majorComponents > 1) {
           hardFailures.push(idx);
         }
         boxes[idx] = { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, area };
@@ -659,41 +751,31 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     }
   }
 
-  // Pass 3: rebuild the sheet with a locked torso.
+  // Pass 3: draw complete, intact characters aligned to a shared baseline.
   //
-  // Every cell keeps its own head pose but shares one torso, so the shirt and
-  // shoulders are pixel-identical across all nine. This is what stops the
-  // bottom-row poses — where the model leaves detached shoulder fragments —
-  // from shipping as a bloated, misaligned torso.
-  const usable = rawCells.filter((c): c is HTMLCanvasElement => Boolean(c));
+  // Every cell keeps its full, cohesive character portrait (face, chin, neck, shirt)
+  // as drawn by the model — with zero decapitation or mismatched glued chins.
+  // Characters are scaled to a consistent height and bottom-anchored so all poses
+  // share a stable baseline across all 9 angles and reactions.
+  const validBoxes = boxes.filter((b): b is NonNullable<typeof b> => Boolean(b));
+  const heights = validBoxes.map((b) => b.h).sort((a, b) => a - b);
+  const medianH = heights[Math.floor(heights.length / 2)] || 1;
+  const targetH = cell * 0.86;
+  const scale = targetH / medianH;
 
-  let repaired = false;
-  if (usable.length === 9) {
-    const locked = lockTorsoAcrossSheet(usable, size);
-    octx.clearRect(0, 0, size, size);
-    octx.drawImage(locked, 0, 0);
-    // The lock replaces every torso with one clean reference and re-anchors
-    // every head, so the scale/aspect outliers measured above have already been
-    // corrected. They must no longer veto the sheet.
-    repaired = true;
-    oddCells.length = 0;
-    // Hard failures (too much fill, overlapping characters) are NOT cleared —
-    // the torso lock cannot fix a cell that contains multiple characters or
-    // a character that fills most of the cell.
-  } else {
-    // Not a full grid — fall back to per-cell normalisation so something usable
-    // is still produced.
-    for (let row = 0; row < 3; row++) {
-      for (let col = 0; col < 3; col++) {
-        const idx = row * 3 + col;
-        const box = boxes[idx];
-        const raw = rawCells[idx];
-        if (!box || !raw) continue;
-        octx.drawImage(raw, box.x, box.y, box.w, box.h,
-          col * cell + cell * 0.5 - box.w / 2,
-          row * cell + cell * 0.34 - box.h * 0.15,
-          box.w, box.h);
-      }
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const idx = row * 3 + col;
+      const box = boxes[idx];
+      const raw = rawCells[idx];
+      if (!box || !raw) continue;
+
+      const dw = box.w * scale;
+      const dh = box.h * scale;
+      const dx = col * cell + (cell - dw) / 2;
+      const dy = row * cell + cell * 0.94 - dh;
+
+      octx.drawImage(raw, box.x, box.y, box.w, box.h, dx, dy, dw, dh);
     }
   }
 
@@ -708,7 +790,7 @@ export function extractGridSheet(keyed: KeyedImage, size = 1080): ExtractedSheet
     emptyCells,
     oddCells,
     alignment: measureAlignment(out),
-    repaired,
+    repaired: false,
     reason: ok
       ? undefined
       : emptyCells.length > 0

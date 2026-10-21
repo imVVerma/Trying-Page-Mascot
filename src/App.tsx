@@ -222,11 +222,13 @@ export default function App() {
       const MAX_ATTEMPTS = 2;
       let built: Awaited<ReturnType<typeof buildMascotAssets>> | null = null;
       let fellBack = 0;
+      let lastWarnings: string[] | undefined;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         if (attempt > 0) {
           setGenerationStatus('Retrying with a fresh layout…');
         }
         const assets = await generateMascot(photo);
+        lastWarnings = assets.warnings;
 
         setGenerationStatus('Building your sticker pack…');
         const candidate = await buildMascotAssets({
@@ -250,12 +252,13 @@ export default function App() {
 
       // Be honest when a sheet had to fall back to the procedural rig.
       if (fellBack > 0) {
+        const upstreamHint = lastWarnings?.[0] ? ` (${lastWarnings[0]})` : '';
         setGenerationError(
           fellBack === 2
             ? 'The 3×3 angle and expression sheets could not be drawn, so the mascot only tilts ' +
-              'slightly rather than turning. Try generating again.'
+              `slightly rather than turning.${upstreamHint} Try generating again.`
             : 'One of the two 3×3 sheets could not be drawn and was rebuilt locally, so it will ' +
-              'be less consistent than the other.'
+              `be less consistent than the other.${upstreamHint}`
         );
       }
 

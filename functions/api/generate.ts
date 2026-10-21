@@ -62,8 +62,9 @@ const BUST_PROMPT =
   'Identity: match their hairstyle and hair colour, their glasses and frames, their skin tone, ' +
   'and their clothing colours and style exactly. ' +
   STYLE_RULES +
-  ' Framing: front-facing head-and-shoulders bust, head fully inside the frame with clear space ' +
-  'above the hair, shoulders cut off cleanly at the bottom edge, character centred. ' +
+  ' Framing: front-facing head-and-shoulders bust, centered with at least 25% empty magenta background ' +
+  'above the topmost hair so the crown is completely intact with generous breathing room above. Shoulders ' +
+  'cut off cleanly at the bottom edge. ' +
   BACKGROUND_RULES;
 
 /**
@@ -79,28 +80,25 @@ const BUST_PROMPT =
 const DIRECTIONS_PROMPT =
   'Using the reference character, draw a sprite sheet containing NINE separate small portraits ' +
   'arranged in a strict 3x3 grid.\n\n' +
-  'CRITICAL SIZE RULES — READ CAREFULLY, THESE ARE THE MOST IMPORTANT INSTRUCTIONS:\n' +
-  '- Each portrait is TINY. The character must fill NO MORE THAN ONE THIRD of its cell. ' +
-  'Imagine a 3x3 grid of tiny stickers on a big magenta canvas.\n' +
-  '- The character\'s head (including hair) must be no taller than ONE QUARTER of the cell height.\n' +
-  '- There must be WIDE EMPTY MAGENTA SPACE on ALL FOUR SIDES of every character: above the hair, ' +
-  'below the shoulders, to the left and to the right. At least one third of the cell must be empty ' +
-  'background on every side.\n' +
-  '- NO character may touch, overlap or cross a cell boundary. Each one is FULLY ENCLOSED inside ' +
-  'its own cell with generous empty space around it.\n' +
-  '- All nine characters are EXACTLY the same size. No character is larger than the others.\n' +
-  '- There is NO large portrait, NO close-up, NO hero image anywhere. Every face is tiny and equal.\n' +
-  '- There are NO lines, frames, borders, divider lines, separators, boxes or grid lines. ' +
-  'Cells are separated only by plain empty magenta background.\n' +
-  '- DO NOT draw one big character spanning multiple cells. Each cell contains ONE small, ' +
-  'self-contained portrait.\n\n' +
+  'CRITICAL SIZE AND HEADROOM RULES — READ CAREFULLY:\n' +
+  '- Each portrait is SMALL. The character must fill NO MORE THAN ONE THIRD of its cell.\n' +
+  '- Leave at least 25% WIDE EMPTY MAGENTA SPACE ABOVE the top of the hair in EVERY cell. ' +
+  'Hair and head must NEVER touch, overlap, or be cropped by the top border of the cell.\n' +
+  '- There must be wide empty magenta background on ALL FOUR SIDES of every character.\n' +
+  '- No character touches or crosses a cell boundary. Each one is fully enclosed inside its own cell.\n' +
+  '- All nine characters are exactly the same size. There are NO lines, frames, dividers, or borders.\n\n' +
+  'MANDATORY POSE DIRECTIONS (CRITICAL CONTRAST BY COLUMN):\n' +
+  '- COLUMN 1 (Left column: Row 1 left, Row 2 left, Row 3 left): The character\'s head MUST turn physically to the LEFT (3/4 left turn, looking toward the left edge).\n' +
+  '- COLUMN 2 (Middle column: Row 1 middle, Row 2 middle, Row 3 middle): The character\'s head MUST face STRICTLY STRAIGHT FORWARD directly at the camera.\n' +
+  '- COLUMN 3 (Right column: Row 1 right, Row 2 right, Row 3 right): The character\'s head MUST turn physically to the RIGHT (3/4 right turn, looking toward the right edge).\n' +
+  'DO NOT draw the character facing the same direction across different columns!\n\n' +
   'CELL CONTENTS, in order:\n' +
-  'Row 1, left cell: head turned up and to the left. Row 1, middle cell: head tilted straight up. ' +
-  'Row 1, right cell: head turned up and to the right.\n' +
-  'Row 2, left cell: head turned three-quarters to the left. Row 2, middle cell: facing straight ' +
-  'forward. Row 2, right cell: head turned three-quarters to the right.\n' +
-  'Row 3, left cell: head turned down and to the left. Row 3, middle cell: head tilted straight ' +
-  'down. Row 3, right cell: head turned down and to the right.\n\n' +
+  'Row 1, left cell: head turned 45 degrees up and to the left. Row 1, middle cell: head tilted straight up. ' +
+  'Row 1, right cell: head turned 45 degrees up and to the right.\n' +
+  'Row 2, left cell: head turned 45 degrees left. Row 2, middle cell: facing strictly straight forward. ' +
+  'Row 2, right cell: head turned 45 degrees right.\n' +
+  'Row 3, left cell: head turned 45 degrees down and to the left. Row 3, middle cell: head tilted straight ' +
+  'down. Row 3, right cell: head turned 45 degrees down and to the right.\n\n' +
   'In every cell the body, shoulders, clothing, hair and glasses stay identical and facing ' +
   'forward; only the head direction changes. Same character, same colours, same art style, same ' +
   'flat vector cartoon look with bold black outlines in all nine.\n\n' +
@@ -110,39 +108,32 @@ const DIRECTIONS_PROMPT =
  * Uses the same "nine separate small portraits" skeleton as DIRECTIONS_PROMPT,
  * which is what stopped the model producing one hero subject in the middle of
  * the sheet. Only the per-cell descriptions differ.
- *
- * Measured result: cell-area spread 1.08, worst-cell-vs-median 1.04 — both
- * inside the range of the official reference sheets.
  */
 const REACTIONS_PROMPT =
   'Using the reference character, draw a sprite sheet containing NINE separate small portraits ' +
   'arranged in a strict 3x3 grid.\n\n' +
-  'SIZE AND SPACING RULES — these matter more than anything else:\n' +
-  '- Each portrait is SMALL. The character fills only the middle third of its own cell.\n' +
-  '- Every character has wide, empty magenta background on ALL FOUR sides of it: above the hair, ' +
-  'below the shoulders, to the left and to the right.\n' +
-  '- No character touches, overlaps or crosses a cell boundary. Each one is fully enclosed ' +
-  'inside its own cell.\n' +
-  '- All nine characters are exactly the same size as one another. No character is larger than ' +
-  'the others.\n' +
-  '- There is NO large portrait, NO close-up and NO hero image anywhere in the picture. Every face ' +
-  'is small and equal-sized.\n' +
-  '- There are NO lines, frames, borders, divider lines, separators, boxes or grid lines anywhere. ' +
-  'Cells are separated only by plain empty background.\n\n' +
-  'CELL CONTENTS, in order. Only the FACE changes between cells — the head shape, hair, glasses, ' +
-  'body, shoulders and clothing stay exactly as they are:\n' +
-  'Row 1, left cell: gentle blink, relaxed closed eyelids, soft smile. Row 1, middle cell: ' +
-  'heart-shaped eyes sparkling with love, wide happy smile. Row 1, right cell: excited sparkling ' +
-  'eyes with bright star-shaped highlights, open delighted smile.\n' +
-  'Row 2, left cell: surprised, wide open eyes and a small round open mouth. Row 2, middle cell: ' +
-  'playful wink, one eye closed in a curve, tongue slightly out, cheeky smile. Row 2, right cell: ' +
-  'bashful and shy, heavy pink blush across both cheeks, small closed smile.\n' +
-  'Row 3, left cell: sleepy, heavy half-closed drooping eyelids, tiny yawn. Row 3, middle cell: ' +
-  'dizzy, spiral swirl eyes, wobbly unsure mouth. Row 3, right cell: delighted, big open laughing ' +
-  'smile with mouth wide open.\n\n' +
-  'The character is completely identical in all nine cells: same head, same hair, same glasses, ' +
+  'CRITICAL SIZE AND HEADROOM RULES — READ CAREFULLY:\n' +
+  '- Each portrait is SMALL. The character must fill NO MORE THAN ONE THIRD of its cell.\n' +
+  '- Leave at least 25% WIDE EMPTY MAGENTA SPACE ABOVE the top of the hair in EVERY cell. ' +
+  'Hair and head must NEVER touch, overlap, or be cropped by the top border of the cell.\n' +
+  '- There must be wide empty magenta background on ALL FOUR SIDES of every character.\n' +
+  '- No character touches or crosses a cell boundary. Each one is fully enclosed inside its own cell.\n' +
+  '- EQUAL SCALE ACROSS ALL CELLS: All nine characters are identically sized small busts showing head, shoulders and shirt. ' +
+  'The center cell (Row 2, middle cell) is the EXACT SAME small scale as all other cells. Absolutely NO enlarged hero image and NO zoomed-in close-up face anywhere.\n' +
+  '- There are NO frames, dividers, or grid lines anywhere. Cells are separated only by plain empty background.\n\n' +
+  'MANDATORY EXPRESSION DIVERSITY — EACH CELL MUST HAVE A UNIQUE EXPRESSION:\n' +
+  'Row 1, left cell: gentle blink, peaceful closed curved eyelids, soft warm smile (Blink).\n' +
+  'Row 1, middle cell: sparkling bright pink heart-shaped eyes sparkling with love, wide happy smile (Heart Eyes).\n' +
+  'Row 1, right cell: playful star wink, one eye closed in a cheeky curve, one eye wide open, cheerful smile (Wink).\n' +
+  'Row 2, left cell: surprised, wide round open eyes and small open "O" mouth in astonishment (Surprised).\n' +
+  'Row 2, middle cell: small bust facing strictly straight forward with a cheerful gentle smile, identical small scale as surrounding cells.\n' +
+  'Row 2, right cell: excited eyes with bright 4-point golden anime stars and catchlights, delighted smile (Sparkle).\n' +
+  'Row 3, left cell: shy sweet smile, heavy bright rosy anime blush across both cheeks (Bashful).\n' +
+  'Row 3, middle cell: hypnosis spiral swirl eyes with wobbly wavy mouth. ONLY this cell has spiral glasses! (Dizzy).\n' +
+  'Row 3, right cell: delighted, happy curved eye arcs (^▽^) and big open laughing smile (Delighted Joy).\n\n' +
+  'The character is completely identical in all nine cells: same head size, same hair, same glasses, ' +
   'same skin tone, same clothing, same colours, same art style — flat vector cartoon with bold ' +
-  'clean black outlines. Only the facial expression differs.\n\n' +
+  'clean black outlines. Only the facial expression differs in each cell.\n\n' +
   BACKGROUND_RULES;
 
 const corsHeaders: Record<string, string> = {
@@ -291,11 +282,17 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
     if (!dirCall.image) console.warn('Directions sheet failed:', dirCall.detail);
     if (!reactCall.image) console.warn('Reactions sheet failed:', reactCall.detail);
 
+    const warnings = [
+      dirCall.image ? null : dirCall.detail,
+      reactCall.image ? null : reactCall.detail,
+    ].filter(Boolean) as string[];
+
     return json({
       success: true,
       bust,
       directions: dirCall.image,
       reactions: reactCall.image,
+      warnings: warnings.length > 0 ? warnings : undefined,
       traits: traits || undefined,
       model,
     });

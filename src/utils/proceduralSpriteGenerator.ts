@@ -85,11 +85,18 @@ async function resolveSheet(
       if (keyed) {
         const sheet = extractGridSheet(keyed, SHEET_SIZE);
         if (sheet.ok) {
-          return { url: sheet.canvas.toDataURL('image/webp', 0.95), source: 'ai' };
+          if (kind === 'reactions' && !isReactionSheetDiverse(sheet.canvas)) {
+            console.warn(
+              '[mascot] reactions sheet lacks expression diversity (cells collapsed into duplicates); using procedural fallback'
+            );
+          } else {
+            return { url: sheet.canvas.toDataURL('image/webp', 0.95), source: 'ai' };
+          }
+        } else {
+          console.warn(
+            `[mascot] ${kind} sheet rejected (${sheet.reason}); using procedural fallback`
+          );
         }
-        console.warn(
-          `[mascot] ${kind} sheet rejected (${sheet.reason}); using procedural fallback`
-        );
       } else {
         console.warn(`[mascot] ${kind} sheet was not magenta-backed; using fallback`);
       }
@@ -103,6 +110,62 @@ async function resolveSheet(
     url: kind === 'directions' ? sheets.directionsUrl : sheets.reactionsUrl,
     source: 'procedural',
   };
+}
+
+/**
+ * Verifies that a generated reactions sheet actually contains diverse expressions
+ * rather than a single repeated expression (e.g. all dizzy spirals across 9 cells).
+ */
+function isReactionSheetDiverse(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return true;
+
+  const w = canvas.width;
+  const h = canvas.height;
+  const cellW = w / 3;
+  const cellH = h / 3;
+
+  // Face sample region within each 360x360 cell
+  const sampleW = Math.round(cellW * 0.45);
+  const sampleH = Math.round(cellH * 0.4);
+  const sampleOffX = Math.round(cellW * 0.275);
+  const sampleOffY = Math.round(cellH * 0.25);
+
+  const refX = sampleOffX;
+  const refY = sampleOffY;
+  const refData = ctx.getImageData(refX, refY, sampleW, sampleH).data;
+
+  let totalDiff = 0;
+  let count = 0;
+
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      if (r === 0 && c === 0) continue;
+      const curX = c * cellW + sampleOffX;
+      const curY = r * cellH + sampleOffY;
+      const curData = ctx.getImageData(curX, curY, sampleW, sampleH).data;
+
+      let cellDiff = 0;
+      let opaquePx = 0;
+      for (let p = 0; p < refData.length; p += 4) {
+        if (refData[p + 3] > 40 && curData[p + 3] > 40) {
+          const dr = Math.abs(refData[p] - curData[p]);
+          const dg = Math.abs(refData[p + 1] - curData[p + 1]);
+          const db = Math.abs(refData[p + 2] - curData[p + 2]);
+          cellDiff += (dr + dg + db) / 3;
+          opaquePx++;
+        }
+      }
+      if (opaquePx > 0) {
+        totalDiff += cellDiff / opaquePx;
+        count++;
+      }
+    }
+  }
+
+  if (count === 0) return true;
+  const avgDiff = totalDiff / count;
+  return avgDiff >= 12.0;
 }
 
 /**
@@ -310,143 +373,9 @@ export function createDieCutStickerBust(imgElement: HTMLImageElement, size: numb
   return canvas;
 }
 
-/**
- * Helper to identify bright magenta chroma-key background pixels (#FF00FF).
- */
-function isMagentaChroma(r: number, g: number, b: number): boolean {
-  const dist = Math.hypot(r - 255, g - 0, b - 255);
-  return (dist < 140 && g < 115) || (r > 165 && g < 100 && b > 165 && Math.abs(r - b) < 65);
-}
 
-/**
- * Extracts and processes an AI-generated 3x3 sprite sheet on a #FF00FF magenta chroma-key background.
- * If the image is detected as a 3x3 chroma-key grid, it removes the background cleanly
- * and builds authentic 9-perspective directions and 9-expression reaction sheets.
- */
-async function extractChromaKeySpriteSheets(
-  imgElement: HTMLImageElement
-): Promise<GeneratedMascotSheets | null> {
-  const w = imgElement.naturalWidth || imgElement.width || 1024;
-  const h = imgElement.naturalHeight || imgElement.height || 1024;
 
-  const testCanvas = document.createElement('canvas');
-  testCanvas.width = w;
-  testCanvas.height = h;
-  const tCtx = testCanvas.getContext('2d', { willReadFrequently: true });
-  if (!tCtx) return null;
 
-  tCtx.drawImage(imgElement, 0, 0, w, h);
-  const imgData = tCtx.getImageData(0, 0, w, h);
-  const data = imgData.data;
-
-  // 1. Perimeter sampling to verify magenta chroma-key background
-  let magentaCount = 0;
-  const samples = 60;
-  for (let i = 0; i < samples; i++) {
-    const x = Math.floor((i / samples) * (w - 4)) + 2;
-    // Top border
-    let idx = (2 * w + x) * 4;
-    if (isMagentaChroma(data[idx], data[idx + 1], data[idx + 2])) magentaCount++;
-    // Bottom border
-    idx = ((h - 3) * w + x) * 4;
-    if (isMagentaChroma(data[idx], data[idx + 1], data[idx + 2])) magentaCount++;
-  }
-
-  // If less than 25% of outer border is magenta, this is a standard photo or non-chroma image
-  if (magentaCount / (samples * 2) < 0.25) {
-    return null;
-  }
-
-  // 2. Remove magenta chroma-key with edge alpha feathering
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const dist = Math.hypot(r - 255, g, b - 255);
-
-    if (dist < 115 && g < 95) {
-      data[i + 3] = 0;
-    } else if (dist < 165 && g < 130) {
-      const alpha = (dist - 115) / (165 - 115);
-      data[i + 3] = Math.round(data[i + 3] * Math.max(0, Math.min(1, alpha)));
-    }
-  }
-  tCtx.putImageData(imgData, 0, 0);
-
-  // 3. Assemble 1080x1080 3x3 Directions Sheet (Preserving the AI's 9 3D perspective angles)
-  const SHEET_SIZE = 1080;
-  const CELL_SIZE = 360;
-  const pad = 15;
-  const drawSize = CELL_SIZE - pad * 2; // 330px
-
-  const dirCanvas = document.createElement('canvas');
-  dirCanvas.width = SHEET_SIZE;
-  dirCanvas.height = SHEET_SIZE;
-  const dCtx = dirCanvas.getContext('2d');
-  if (!dCtx) return null;
-
-  const scw = w / 3;
-  const sch = h / 3;
-
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 3; c++) {
-      const sx = c * scw;
-      const sy = r * sch;
-      const dx = c * CELL_SIZE + pad;
-      const dy = r * CELL_SIZE + pad;
-      dCtx.drawImage(testCanvas, sx, sy, scw, sch, dx, dy, drawSize, drawSize);
-    }
-  }
-
-  // 4. Assemble 1080x1080 3x3 Reactions Sheet using center forward-facing cell (r=1, c=1)
-  const centerBustCanvas = document.createElement('canvas');
-  centerBustCanvas.width = drawSize;
-  centerBustCanvas.height = drawSize;
-  const cbCtx = centerBustCanvas.getContext('2d');
-  if (cbCtx) {
-    cbCtx.drawImage(testCanvas, scw, sch, scw, sch, 0, 0, drawSize, drawSize);
-  }
-
-  const feat = {
-    eyeLeft: { x: drawSize * 0.42, y: drawSize * 0.44 },
-    eyeRight: { x: drawSize * 0.58, y: drawSize * 0.44 },
-    eyeDistance: Math.round(drawSize * 0.16),
-    eyeTilt: 0,
-    nose: { x: drawSize * 0.5, y: drawSize * 0.5 },
-    mouth: { x: drawSize * 0.5, y: drawSize * 0.58 },
-    cheekLeft: { x: drawSize * 0.36, y: drawSize * 0.52 },
-    cheekRight: { x: drawSize * 0.64, y: drawSize * 0.52 },
-    faceCenter: { x: drawSize * 0.5, y: drawSize * 0.46 },
-    headSize: Math.round(drawSize * 0.48),
-  };
-
-  const reactCanvas = document.createElement('canvas');
-  reactCanvas.width = SHEET_SIZE;
-  reactCanvas.height = SHEET_SIZE;
-  const rCtx = reactCanvas.getContext('2d');
-  if (!rCtx) return null;
-
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < 3; c++) {
-      const idx = r * 3 + c;
-      const cx = c * CELL_SIZE + CELL_SIZE / 2;
-      const cy = r * CELL_SIZE + CELL_SIZE / 2;
-
-      rCtx.save();
-      rCtx.translate(cx, cy);
-      // Center base character bust
-      rCtx.drawImage(centerBustCanvas, -drawSize / 2, -drawSize / 2);
-      // Reaction vector overlays
-      renderReactionOverlays(rCtx, idx, feat, drawSize);
-      rCtx.restore();
-    }
-  }
-
-  return {
-    directionsUrl: dirCanvas.toDataURL('image/webp', 0.95),
-    reactionsUrl: reactCanvas.toDataURL('image/webp', 0.95),
-  };
-}
 
 /**
  * Renders the 9 pro reaction overlays (blush, heart eyes, sparkle, wink, dizzy, etc.)
@@ -564,11 +493,6 @@ export async function generateSpriteSheetsFromPhoto(
   imgElement: HTMLImageElement,
   options: SpriteGenerationOptions = {}
 ): Promise<GeneratedMascotSheets> {
-  // First, check if the image is an AI-generated 3x3 sprite sheet with #FF00FF chroma-key background
-  const chromaSheets = await extractChromaKeySpriteSheets(imgElement);
-  if (chromaSheets) {
-    return chromaSheets;
-  }
 
   const SHEET_SIZE = 1080;
   const CELL_SIZE = 360; // 3x3 grid

@@ -94,6 +94,8 @@ export interface GeneratedAssets {
   reactions: string | null;
   /** One-sentence subject description, when the server could produce one. */
   traits?: string;
+  /** Upstream reasons or warnings if any sheets could not be drawn. */
+  warnings?: string[];
 }
 
 /**
@@ -138,6 +140,7 @@ export async function generateMascot(
       directions: data.directions ?? null,
       reactions: data.reactions ?? null,
       traits: data.traits,
+      warnings: data.warnings,
     };
   } catch (error: any) {
     if (error?.name === 'AbortError') {
